@@ -5,6 +5,13 @@ unattended: boot to the title screen or the ship, run Lua inside the game, enter
 capture the window, soak for crashes, and collect logs and crash dumps afterwards. Every file it changes is put
 back and verified.
 
+> [!WARNING]
+> **HellForge only.** The harness works with the game copy of a HellForge installation, not with the vanilla game as
+> Steam installs it today. Its offsets, mission addresses and crash signatures are for game build 25480438, the build
+> HellForge copies run, and the Steam release has moved past that build: on it `ship`, `mission`, `map`, live
+> game-state reads and crash signatures do not work, and no session ends clean. Put `--target hellforge` before every
+> command or set `HD2H_TARGET=hellforge`: the default target is still `steam`.
+
 It is a tool for mod developers, built to be driven by AI coding agents as well as by people: every command runs
 without prompts and prints JSON, and everything it changes is recorded first and restored afterwards. The in-game agent
 it deploys is a test fixture: it is never meant to ship inside a mod release.
@@ -17,11 +24,14 @@ calls game functions from a Lua mod; use it at your own risk, on your own accoun
 
 - Windows (the harness uses Win32 through `ctypes` and the registry through `winreg`).
 - Python 3.10 or later (tested with 3.13). Standard library only: nothing to install.
-- Helldivers 2 through Steam, with Steam running. The default install folder is
-  `C:\Program Files (x86)\Steam\steamapps\common\Helldivers 2`; set `HD2_GAME_ROOT` for another.
-- [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader) v15 or later deployed among your
-  mods: it starts the agent. The `vanilla` condition needs no loader; `packages` takes it from a package ZIP.
-- Optional: a HellForge installation, for `--target hellforge` (see HellForge target below).
+- A HellForge installation whose game copy is build 25480438 (default `C:\HellForge`; see HellForge target below),
+  with Steam running: the copy checks game ownership through it.
+- The [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader) v20 manager ZIP (`HD2H_LOADER_ZIP`),
+  unless the installation already has the loader enabled: it starts the agent.
+- The `steam` target drives a Steam install (default folder
+  `C:\Program Files (x86)\Steam\steamapps\common\Helldivers 2`, `HD2_GAME_ROOT` for another) with Bingus Shared Loader
+  v15 or later deployed among its mods (the `vanilla` condition needs no loader; `packages` takes it from a package
+  ZIP). It works only on an install of build 25480438, which the current Steam release is not.
 - The known-build data (offsets, crash signatures, mission addresses) is for game build 25480438. On another build
   the harness still deploys, launches, runs `lua` commands and restores, but live game-state reads (state, lobby
   privacy), `ship`, `mission` and crash signatures need that build's entry in `hd2h/builds.py`. Without them `stop`
@@ -34,15 +44,16 @@ Clone or unpack the repository anywhere and run `python harness.py <command>` fr
 and the session manifest to `state/` inside it (set `HD2H_HOME` for another folder). Start with:
 
 ```powershell
-python harness.py preflight   # install facts, with the game closed
-python harness.py smoke       # launch -> ship -> snapshot -> quit -> verify the restore
+$env:HD2H_TARGET = 'hellforge'  # or put --target hellforge before every command
+python harness.py preflight     # install facts, with the game closed
+python harness.py smoke         # launch -> ship -> snapshot -> quit -> verify the restore
 ```
 
 | Variable | Meaning |
 | --- | --- |
-| `HD2_GAME_ROOT` | Steam install folder of the game |
+| `HD2_GAME_ROOT` | Steam install folder of the game (`steam` target) |
 | `HD2H_HOME` | where `state/` and `runs/` go (default: the harness folder) |
-| `HD2H_TARGET` | `steam` (default) or `hellforge` |
+| `HD2H_TARGET` | `hellforge` (see the warning above) or `steam` (the default) |
 | `HD2H_HELLFORGE_ROOT`, `HD2H_HELLFORGE_PROFILE` | HellForge installation and profile |
 | `HD2H_LOADER_ZIP` | Bingus Shared Loader v20 manager ZIP for HellForge sessions (default `../releases/Bingus-Shared-Loader-v20.zip`, beside the harness folder) |
 
