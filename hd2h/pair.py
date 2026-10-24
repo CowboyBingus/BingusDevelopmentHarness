@@ -76,6 +76,49 @@ def prepare(paths, role, note):
     return session_id
 
 
+def _sha(data):
+    import hashlib
+    return hashlib.sha256(data).hexdigest().upper()
+
+
+def set_window(paths, role, size, note):
+    """Sets the installation's game window and render size (user_settings.config) to size, for captures the marker can be
+    told apart in: the instances otherwise draw at 427x240 inside a 1280x720 window. The file is backed up first and put
+    back by `stop`. The render size never exceeds the window (a larger upscaler input leaves the world gray, see
+    settings.scale_render_resolution)."""
+    from . import settings
+    path = Path(paths.settings_file)
+    data = path.read_bytes()
+    backup = RECORD.parent / ('pair-window-' + role) / 'user_settings.config.backup'
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_bytes(data)
+    if _sha(backup.read_bytes()) != _sha(data):
+        raise PairError('backup of %s did not verify' % path)
+    _instance(_record(), role, window={'path': str(path), 'backup': str(backup), 'original_sha256': _sha(data)})
+    text = settings.set_resolution(data.decode('utf-8'), *size)
+    if len(settings.RENDER_RESOLUTION.findall(text)) != 1:
+        raise PairError('render_resolution block not found once in %s' % path)
+    text = settings.RENDER_RESOLUTION.sub(lambda m: '\trender_resolution = [%s\t\t%d%s\t\t%d%s\t]' % (
+        m.group(1), size[0], m.group(1), size[1], m.group(1)), text)
+    path.write_bytes(text.encode('utf-8'))
+    note('%s: window and render size %dx%d (settings backed up)' % (role, size[0], size[1]))
+
+
+def restore_window(entry):
+    """Puts user_settings.config back as set_window found it. Returns problems."""
+    if not entry:
+        return []
+    path, backup = Path(entry['path']), Path(entry['backup'])
+    if path.exists() and _sha(path.read_bytes()) == entry['original_sha256']:
+        backup.unlink(missing_ok=True)
+        return []
+    if not backup.exists() or _sha(backup.read_bytes()) != entry['original_sha256']:
+        return ['%s: window backup missing or changed' % path]
+    path.write_bytes(backup.read_bytes())
+    backup.unlink()
+    return []
+
+
 def _hex(value):
     return '%X' % value
 
@@ -370,7 +413,7 @@ def searches(run):
 
 
 def run_map(host_root, searcher_root, directory=DEFAULT_DIRECTORY, options='--toaster_mode', planet=None, seconds=60,
-            difficulty=1, note=print):
+            difficulty=1, searcher_options='', window=(1920, 1080), note=print):
     """The Galactic Map test: the host selects a mission on a planet (its lobby is then listed there with that
     difficulty); the searcher, which does not join, opens its map on the same planet and watches its scanner, with
     captures for a look at the lobby it shows. The two are strangers (HELLFORGE_TEST_STRANGERS): the map's planet scan
@@ -382,7 +425,9 @@ def run_map(host_root, searcher_root, directory=DEFAULT_DIRECTORY, options='--to
     listing = host_listing(directory, planet, difficulty)
     note('host: listed on planet %s at D%s (war %s, lobby %s)' % (planet, difficulty, listing.get('number_key3'),
                                                                   listing.get('hf.lobbyId')))
-    searcher_pid, searcher_run = start(searcher, 'joiner', directory, options, note, strangers=True)
+    if window:
+        set_window(searcher, 'joiner', window, note)
+    searcher_pid, searcher_run = start(searcher, 'joiner', directory, searcher_options, note, strangers=True)
     to_ship(searcher_pid, build, _sandbox_mailbox(searcher_run), 'joiner', note)
     open_map(searcher_pid, build, searcher_run, planet, 'searcher', note)
     watched = watch_map(searcher_pid, build, searcher_run, seconds, note)
@@ -418,6 +463,7 @@ def stop(note=print, wait=120):
         problems += hellforge.remove_packs(paths, data.get('packs') or {})
         if data.get('mods_settings'):
             problems += hellforge.restore_mods_settings(data['mods_settings'])
+        problems += restore_window(data.get('window'))
         Mailbox(_environment(paths.hellforge)).end()
     if not problems and RECORD.exists():
         RECORD.unlink()
