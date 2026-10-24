@@ -24,7 +24,7 @@ import subprocess
 import time
 import uuid
 
-from . import builds, hellforge, navigate, session
+from . import builds, capture, galaxy, hellforge, navigate, session
 from .mailbox import Mailbox, MailboxError
 from .paths import HARNESS, Paths
 
@@ -87,8 +87,9 @@ def _machine_module_path():
         return os.path.expandvars(winreg.QueryValueEx(key, 'PSModulePath')[0])
 
 
-def start(paths, role, directory, game_options, note, timeout=420):
-    """Starts one installation's sandboxed session with the several-instances switches; returns (game pid, run)."""
+def start(paths, role, directory, game_options, note, timeout=420, strangers=False):
+    """Starts one installation's sandboxed session with the several-instances switches; returns (game pid, run).
+    strangers: HELLFORGE_TEST_STRANGERS=1, the two are not friends (no presence; the lobby directory's stranger path)."""
     me, other = (0, 1) if role == 'host' else (1, 0)
     arguments = hellforge.session_arguments(paths, multiplayer=True) + ['--sandbox', '--game-options', game_options]
     environment = dict(os.environ)
@@ -97,6 +98,7 @@ def start(paths, role, directory, game_options, note, timeout=420):
         'HELLFORGE_IDENTITY': str(IDENTITIES[me]),
         'HELLFORGE_PEER_LINK': 'udp:%s:%d:%s=%d' % (_hex(IDENTITIES[me]), LINK_PORTS[me], _hex(IDENTITIES[other]), LINK_PORTS[other]),
         'HELLFORGE_DIRECTORY_FOLDER': str(directory),
+        'HELLFORGE_TEST_STRANGERS': '1' if strangers else '0',
         # the runner's own checks run Windows PowerShell 5.1; an inherited PowerShell 7 module path breaks them
         'PSModulePath': os.path.expandvars(r'%USERPROFILE%\Documents\WindowsPowerShell\Modules;') + _machine_module_path(),
     })
@@ -208,8 +210,9 @@ def watch_join(host_run, timeout=180, note=print):
     return verdict
 
 
-def run(host_root, joiner_root, directory=DEFAULT_DIRECTORY, options='--toaster_mode', note=print):
-    """The whole pairing; returns the join's verdict. Leaves both sessions running for a look (stop ends them)."""
+def _begin(host_root, joiner_root, directory, options, note, strangers=False):
+    """Checks, prepares both installations and brings the host to its ship. Returns (host, joiner, build, host pid,
+    host run)."""
     if _record().get('host') or _record().get('joiner'):
         raise PairError('a pairing is still recorded in %s: run `pair.py stop` first' % RECORD)
     if hellforge.steam_pid_mismatch():
@@ -226,8 +229,14 @@ def run(host_root, joiner_root, directory=DEFAULT_DIRECTORY, options='--toaster_
         stale.unlink()
     prepare(host, 'host', note)
     prepare(joiner, 'joiner', note)
-    host_pid, host_run = start(host, 'host', directory, options, note)
+    host_pid, host_run = start(host, 'host', directory, options, note, strangers=strangers)
     to_ship(host_pid, build, _sandbox_mailbox(host_run), 'host', note)
+    return host, joiner, build, host_pid, host_run
+
+
+def run(host_root, joiner_root, directory=DEFAULT_DIRECTORY, options='--toaster_mode', note=print):
+    """The whole pairing; returns the join's verdict. Leaves both sessions running for a look (stop ends them)."""
+    _, joiner, build, _, host_run = _begin(host_root, joiner_root, directory, options, note)
     lobby = host_lobby(directory)
     note('host: its Steam lobby is %d' % lobby)
     _record({'lobby': lobby})
@@ -235,6 +244,156 @@ def run(host_root, joiner_root, directory=DEFAULT_DIRECTORY, options='--toaster_
     to_ship(joiner_pid, build, _sandbox_mailbox(joiner_run), 'joiner', note)
     verdict = watch_join(host_run, note=note)
     _record({'verdict': verdict})
+    return verdict
+
+
+def _deployer(pid, build, run, note):
+    """The mission module's steps on one sandboxed game, through its run folder's mailbox. Returns (reader, deployer);
+    the caller closes the reader."""
+    from . import winapi
+    from .mission import Deployer, Natives, Probe
+    base = session.game_dll_base(pid, build)
+    if not base:
+        raise PairError('game.dll is not mapped yet')
+    reader = winapi.Reader(pid)
+    deployer = Deployer(Probe(reader, base, build.mission), Natives(_sandbox_mailbox(run), base, build.mission),
+                        lambda: session.live_reads(pid, build).get('state'), note=note)
+    return reader, deployer
+
+
+def travel(deployer, planet, timeout=30.0, arrive=25.0):
+    """Moves the ship to planet (None: the ship's or the first campaign planet) with the war board's commit and no
+    operation, as a deploy travels. Returns the planet. The map's planet view (and so its lobby scanner) follows only
+    the ship's planet when the map opens: focusing another planet on an open map leaves the view on the galaxy
+    (live 2026-10-23, [game+0x3326AA0]+0x55F628 stayed -1)."""
+    from .mission import choose_planet
+    probe = deployer.probe
+    planet = choose_planet(probe.board(), probe.campaign_planets(), planet=planet)
+    if probe.board().get('request_ship_planet') == planet:
+        return planet
+    deployer.require(deployer.natives.board_select(planet, planet, -1, -1, 0), 'moving the ship to %s' % planet)
+    deadline = time.monotonic() + timeout
+    while probe.board().get('request_ship_planet') != planet:
+        if time.monotonic() > deadline:
+            raise PairError('the ship did not move to planet %s within %d s' % (planet, timeout))
+        time.sleep(0.25)
+    # The board says the new planet at once, but the trip takes 15-18 s (KB harness-mission-deploy); a map opened
+    # during it stayed on the galaxy (live 2026-10-23). No arrival field is known: wait out the trip.
+    deployer.note('the ship is travelling to planet %s; waiting %.0f s for it to arrive' % (planet, arrive))
+    time.sleep(arrive)
+    return planet
+
+
+def open_map(pid, build, run, planet, role, note):
+    """Moves the ship to planet, then opens the Galactic Map's planet view (its lobby scanner) there. Returns the
+    planet."""
+    reader, deployer = _deployer(pid, build, run, note)
+    try:
+        planet = travel(deployer, planet)
+        opened = galaxy.open_planet_view(deployer, planet=planet)
+    finally:
+        reader.close()
+    note('%s: Galactic Map open on planet %s (scanner %s)' % (role, opened['planet'], opened['scanner']))
+    return opened['planet']
+
+
+def pick_mission(pid, build, run, planet, difficulty, note):
+    """Moves the host's ship to planet and selects an open mission there at difficulty, without opening its map. Its
+    lobby advertises the difficulty only with a mission selected (number_key5 stays 0 otherwise, and the map's search
+    asks for its own difficulty window), and opening the map clears a selected mission (KB harness-mission-deploy);
+    a mission committed on an open map sent the host back to the title screen (live 2026-10-23). Returns the planet."""
+    from .mission import pick_mission as first_open
+    reader, deployer = _deployer(pid, build, run, note)
+    try:
+        planet = travel(deployer, planet)
+        probe = deployer.probe
+        op, record = first_open(probe.operations(), probe.mission_record, planet, difficulty)
+        if not op:
+            raise PairError('no open mission at D%s on planet %s' % (difficulty, planet))
+        deployer.require(deployer.natives.board_select(planet, planet, op['index'], record['mission'], difficulty),
+                         'selecting mission %s' % record['mission'])
+    finally:
+        reader.close()
+    note('host: mission %s selected on planet %s at D%s' % (record['mission'], planet, difficulty))
+    return planet
+
+
+def host_listing(directory, planet, difficulty, timeout=90):
+    """The host's directory listing once it advertises planet and difficulty (PlayFab keys number_key4 and
+    number_key5)."""
+    file = Path(directory) / ('%X.json' % IDENTITIES[0])
+    deadline, listing = time.monotonic() + timeout, {}
+    while time.monotonic() < deadline:
+        try:
+            listing = json.loads(file.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            listing = {}
+        if listing.get('number_key4') == str(planet) and listing.get('number_key5') == str(difficulty):
+            return listing
+        time.sleep(1)
+    raise PairError('the host was not listed on planet %s at D%s within %d s (its listing: war %s, planet %s, '
+                    'difficulty %s)' % (planet, difficulty, timeout, listing.get('number_key3'),
+                                        listing.get('number_key4'), listing.get('number_key5')))
+
+
+def watch_map(pid, build, run, seconds, note, settle=3.0, most=8):
+    """Watches the searcher's lobby scanner and captures its window: once at the start and `settle` s after every
+    scan (the map draws the lobbies it found once their records arrive). Returns the scans and the captures."""
+    reader, deployer = _deployer(pid, build, run, note)
+    shots, scans, last, due = [], [], None, [time.monotonic()]
+    started, taken = time.monotonic(), len(list((Path(run) / 'shots').glob('*.png')))
+    try:
+        while time.monotonic() < started + seconds:
+            state = galaxy.scanner(deployer.probe)
+            if state and last and None not in (state['recharge'], last['recharge']) \
+                    and state['recharge'] > last['recharge'] + 1:
+                scans.append({'at_s': round(time.monotonic() - started, 1), 'results': state['results']})
+                note('searcher: lobby scan %d: %d results' % (len(scans), state['results']))
+                due.append(time.monotonic() + settle)
+            last = state or last
+            if due and time.monotonic() >= due[0] and len(shots) < most:
+                due.pop(0)
+                name = '%02d-map-scan%d.png' % (taken + len(shots) + 1, len(scans))
+                shots.append(dict(capture.shoot(pid, Path(run) / 'shots' / name), scans=len(scans),
+                                  results=(last or {}).get('results')))
+                note('searcher: captured %s' % name)
+            time.sleep(0.25)
+    finally:
+        reader.close()
+    return {'scans': scans, 'shots': shots}
+
+
+def searches(run):
+    """The searcher backend's directory searches: (listed, shown) per search, from its multiplayer.log."""
+    return [(int(listed), int(shown)) for listed, shown in re.findall(r'Directory: search .*?: (\d+) listed, (\d+) shown',
+                                                                      _log(run))]
+
+
+def run_map(host_root, searcher_root, directory=DEFAULT_DIRECTORY, options='--toaster_mode', planet=None, seconds=60,
+            difficulty=1, note=print):
+    """The Galactic Map test: the host selects a mission on a planet (its lobby is then listed there with that
+    difficulty); the searcher, which does not join, opens its map on the same planet and watches its scanner, with
+    captures for a look at the lobby it shows. The two are strangers (HELLFORGE_TEST_STRANGERS): the map's planet scan
+    leaves out friends' lobbies (the friend-lobby pass marks them seen and a planet scan does not score them; live
+    2026-10-23, the scorer 0x133B550 kept the host's lobby only with the seen-sets empty), which the game lists under
+    Social instead. Leaves both sessions running (stop ends them)."""
+    _, searcher, build, host_pid, host_run = _begin(host_root, searcher_root, directory, options, note, strangers=True)
+    planet = pick_mission(host_pid, build, host_run, planet, difficulty, note)
+    listing = host_listing(directory, planet, difficulty)
+    note('host: listed on planet %s at D%s (war %s, lobby %s)' % (planet, difficulty, listing.get('number_key3'),
+                                                                  listing.get('hf.lobbyId')))
+    searcher_pid, searcher_run = start(searcher, 'joiner', directory, options, note, strangers=True)
+    to_ship(searcher_pid, build, _sandbox_mailbox(searcher_run), 'joiner', note)
+    open_map(searcher_pid, build, searcher_run, planet, 'searcher', note)
+    watched = watch_map(searcher_pid, build, searcher_run, seconds, note)
+    found = searches(searcher_run)
+    verdict = {'planet': planet, 'scans': len(watched['scans']),
+               'scan_results': max([s['results'] for s in watched['scans']] or [0]),
+               'directory_searches': len(found), 'directory_shown': max([shown for _, shown in found] or [0]),
+               'shots': [s['file'] for s in watched['shots']]}
+    verdict['found'] = verdict['scan_results'] > 0 and verdict['directory_shown'] > 0
+    note('map: %s' % json.dumps(verdict))
+    _record({'map': verdict})
     return verdict
 
 
