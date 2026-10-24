@@ -442,6 +442,60 @@ def run_map(host_root, searcher_root, directory=DEFAULT_DIRECTORY, options='--to
     return verdict
 
 
+def _launch(deployer, load_timeout, attempts=20, wait=5.0):
+    """The launch step, retried while the trip's cutscene plays ("ready refused: a cutscene is playing", live
+    2026-10-24, right after the drop on a ship that had just travelled)."""
+    from .mission import MissionError
+    for attempt in range(attempts):
+        try:
+            return deployer.launch(load_timeout)
+        except MissionError as error:
+            if 'cutscene' not in str(error) or attempt == attempts - 1:
+                raise
+            time.sleep(wait)
+
+
+def deploy_host(pid, build, run, planet, difficulty, note, load_timeout=300, control_timeout=180):
+    """Deploys the host into a mission on planet at difficulty, until it has control: the map's "Find ongoing
+    missions" draws a lobby only from its decoded live data (marker +0x610, 0x133E220), which a squad on its ship does
+    not have (live 2026-10-24). Returns the mission's planet."""
+    reader, deployer = _deployer(pid, build, run, note)
+    try:
+        planet = travel(deployer, planet)
+        selected = deployer.select(difficulty, planet, None, None, None, None)
+        note('host: mission %s selected on planet %s at D%s' % (selected.get('mission'), planet, difficulty))
+        for name, step in (('briefing', deployer.brief_and_seat), ('drop', deployer.drop),
+                           ('launch', lambda: _launch(deployer, load_timeout)),
+                           ('control', lambda: deployer.wait_control(control_timeout))):
+            step()
+            note('host: %s done' % name)
+    finally:
+        reader.close()
+    return planet
+
+
+def run_ongoing(host_root, searcher_root, directory=DEFAULT_DIRECTORY, options='--toaster_mode', planet=None,
+                seconds=25, difficulty=1, searcher_options='', window=(1920, 1080), note=print):
+    """The map test with the host in a mission (an ongoing mission), not on its ship. The searcher opens its map on
+    the same planet as in run_map. Leaves both sessions running (stop ends them)."""
+    _, searcher, build, host_pid, host_run = _begin(host_root, searcher_root, directory, options, note, strangers=True)
+    planet = deploy_host(host_pid, build, host_run, planet, difficulty, note)
+    if window:
+        set_window(searcher, 'joiner', window, note)
+    searcher_pid, searcher_run = start(searcher, 'joiner', directory, searcher_options, note, strangers=True)
+    to_ship(searcher_pid, build, _sandbox_mailbox(searcher_run), 'joiner', note)
+    open_map(searcher_pid, build, searcher_run, planet, 'searcher', note)
+    watched = watch_map(searcher_pid, build, searcher_run, seconds, note)
+    found = searches(searcher_run)
+    verdict = {'planet': planet, 'host_in_mission': True, 'scans': len(watched['scans']),
+               'scan_results': max([s['results'] for s in watched['scans']] or [0]),
+               'directory_shown': max([shown for _, shown in found] or [0]),
+               'shots': [s['file'] for s in watched['shots']]}
+    note('ongoing: %s' % json.dumps(verdict))
+    _record({'ongoing': verdict})
+    return verdict
+
+
 def stop(note=print, wait=120):
     """Ends both sessions (their runners' stop signal), removes the packs, puts the Mods settings back and ends the
     agent sessions. Returns the problems left."""
