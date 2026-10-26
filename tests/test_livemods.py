@@ -103,8 +103,8 @@ class SetupAndTeardown(unittest.TestCase):
         original = settings.read_bytes()
         a = test_mod(Path(self.tmp.name) / 'src' / 'live-a', 'test.a')
         b = test_mod(Path(self.tmp.name) / 'src' / 'live-b', 'test.b')
-        result = livemods.setup(self.paths, [a, b], on=['test.b'], off=['skyeshade.vanilla-plus'])
-        self.assertEqual(result['disabled'], ['test.a', 'skyeshade.vanilla-plus'])
+        result = livemods.setup(self.paths, [a, b], on=['test.b'], off=['example.vanilla-plus'])
+        self.assertEqual(result['disabled'], ['test.a', 'example.vanilla-plus'])
         self.assertTrue((self.paths.mods / 'live-a' / 'hellforge-mod.json').exists())
         self.assertEqual(livemods.installed_ids(self.paths)['test.b'], 'live-b')
         with self.assertRaises(livemods.LiveModsError):
@@ -124,7 +124,7 @@ class SetupAndTeardown(unittest.TestCase):
         self.assertTrue(self.record.exists())  # kept, so teardown can run again once resolved
 
     def test_a_mod_the_installation_has_is_refused(self):
-        twin = test_mod(Path(self.tmp.name) / 'src' / 'twin', 'skyeshade.vanilla-plus')
+        twin = test_mod(Path(self.tmp.name) / 'src' / 'twin', 'example.vanilla-plus')
         with self.assertRaises(livemods.LiveModsError):
             livemods.setup(self.paths, [twin])
         self.assertFalse(self.record.exists())
@@ -154,12 +154,12 @@ class Change(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_a_switch_is_saved_then_posted_and_only_new_log_lines_come_back(self):
-        outcome = livemods.change(self.paths, self.manifest, on=[], off=['skyeshade.vanilla-plus'], settle=0)
+        outcome = livemods.change(self.paths, self.manifest, on=[], off=['example.vanilla-plus'], settle=0)
         self.assertEqual(Backend.seen, ['POST'])
         self.assertTrue(outcome['answer']['applied'])
         self.assertEqual(outcome['logs']['live-mods'], ["12:00:00.000 Live mods live1: test.a added. The mods' digest is now abc."])
         self.assertEqual(outcome['session_mods'], ['test.a'])
-        self.assertIn('skyeshade.vanilla-plus', json.loads((self.paths.mods / 'hellforge-mods.json').read_text())['disabled'])
+        self.assertIn('example.vanilla-plus', json.loads((self.paths.mods / 'hellforge-mods.json').read_text())['disabled'])
         self.assertTrue(outcome['game_running'])
 
     def test_preview_gets_and_concurrent_requests_all_answer(self):
@@ -172,7 +172,7 @@ class Change(unittest.TestCase):
         before = (self.paths.mods / 'hellforge-mods.json').read_text()
         with mock.patch.object(livemods, 'ask', return_value={'applied': False, 'live': False, 'blocking': ['x']}):
             verdict = livemods.scenario(self.paths, self.manifest, [
-                {'name': 'refused', 'off': ['skyeshade.vanilla-plus'], 'expect': {'applied': False}}], note=lambda t: None)
+                {'name': 'refused', 'off': ['example.vanilla-plus'], 'expect': {'applied': False}}], note=lambda t: None)
         self.assertEqual(verdict['passed'], 1)
         self.assertEqual(json.loads((self.paths.mods / 'hellforge-mods.json').read_text()), json.loads(before))
 
