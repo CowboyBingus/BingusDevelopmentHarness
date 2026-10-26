@@ -209,6 +209,32 @@ How it differs from the Steam target:
 - **No closing yet.** Open the map last in a session and let `stop` quit from it. A deploy after a map opened this
   way crashed before, and `mission` refuses while a menu is open.
 
+## Two installations on one PC (`pair.py`)
+
+`pair.py` runs two HellForge installations side by side as a host and a joiner, and joins them to each other without
+input (`hd2h/pair.py`): HellForge's several-installations test mode (its brokers keep a local Steam lobby and P2P
+between them, HellForge 0.3.0). Each installation needs its own network block first (one session from each).
+
+```
+python pair.py run --host C:\HellForge-2 --joiner C:\HellForge-3   # the joiner joins the host's lobby; JSON verdict
+python pair.py map --host C:\HellForge-2 --joiner C:\HellForge-3   # the joiner's Galactic Map shows the host's lobby
+python pair.py stop                                                # ends both sessions
+```
+
+## Live mod changes (`livemods.py`)
+
+`livemods.py` changes mods in a running HellForge session as the launcher's Mods page does, and checks each change
+(`hd2h/livemods.py`). It needs a HellForge build with live mod sync (HellForge pull request #65).
+
+- `setup` (game closed) copies test mods into the installation and sets the next session's switches; `teardown` puts
+  everything back, byte for byte, and only removes files that are still the harness's.
+- `change` switches mods in the running session (`POST /hellforge/live-mods`; `--preview` asks without changing).
+- `scenario FILE.json` runs a list of changes with expected answers (examples in `live-mods/`).
+- `pair-sync --host ... --joiner ...` is mod sync on one PC: the joiner, with other mods, joins the host, downloads its
+  mods, takes them live and is invited back.
+
+Results go to the harness run's `live-mods/` folder. `python livemods.py --help` lists every option.
+
 ## Commands
 
 ```powershell
