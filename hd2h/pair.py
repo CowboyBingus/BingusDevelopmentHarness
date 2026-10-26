@@ -1,4 +1,4 @@
-"""Two HellForge installations on one PC, joined to each other without input (KB hellforge-multi-instance-plan).
+"""Two HellForge installations on one PC, joined to each other without input.
 
 Each installation runs a sandboxed session with the several-instances switches (HELLFORGE_MULTI_INSTANCE=1: its own
 SteamID, the backends on a loopback link, the brokers keeping the game's own Steam lobby and Steam P2P between them):
@@ -320,7 +320,7 @@ def travel(deployer, planet, timeout=30.0, arrive=25.0):
         if time.monotonic() > deadline:
             raise PairError('the ship did not move to planet %s within %d s' % (planet, timeout))
         time.sleep(0.25)
-    # The board says the new planet at once, but the trip takes 15-18 s (KB harness-mission-deploy); a map opened
+    # The board says the new planet at once, but the trip takes 15-18 s; a map opened
     # during it stayed on the galaxy (live 2026-10-23). No arrival field is known: wait out the trip.
     deployer.note('the ship is travelling to planet %s; waiting %.0f s for it to arrive' % (planet, arrive))
     time.sleep(arrive)
@@ -343,7 +343,7 @@ def open_map(pid, build, run, planet, role, note):
 def pick_mission(pid, build, run, planet, difficulty, note):
     """Moves the host's ship to planet and selects an open mission there at difficulty, without opening its map. Its
     lobby advertises the difficulty only with a mission selected (number_key5 stays 0 otherwise, and the map's search
-    asks for its own difficulty window), and opening the map clears a selected mission (KB harness-mission-deploy);
+    asks for its own difficulty window), and opening the map clears a selected mission;
     a mission committed on an open map sent the host back to the title screen (live 2026-10-23). Returns the planet."""
     from .mission import pick_mission as first_open
     reader, deployer = _deployer(pid, build, run, note)
