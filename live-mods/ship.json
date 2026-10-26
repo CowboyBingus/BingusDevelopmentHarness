@@ -1,0 +1,446 @@
+{
+ "about": "HellForge live mod sync edge cases on the ship, solo. Needs `livemods.py setup` with the test mods (HellForge-Open artifacts/live-test-mods: test.live-*) copied in and off, the installation's skyeshade.hell-forge off, hellforge.editor and skyeshade.vanilla-plus on.",
+ "steps": [
+  {
+   "name": "nothing changed",
+   "preview": true,
+   "expect": {
+    "detail": "Nothing changed."
+   }
+  },
+  {
+   "name": "preview an add",
+   "preview": true,
+   "on": [
+    "test.live-stats"
+   ],
+   "expect": {
+    "live": true,
+    "applied": false,
+    "detail": "Applies now."
+   }
+  },
+  {
+   "name": "stats: add",
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-stats"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-stats added",
+     "digest is now"
+    ]
+   }
+  },
+  {
+   "name": "stats: remove",
+   "off": [
+    "test.live-stats"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs_not": [
+    "test.live-stats"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-stats removed"
+    ]
+   }
+  },
+  {
+   "name": "stats: add again",
+   "on": [
+    "test.live-stats"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-stats"
+   ]
+  },
+  {
+   "name": "own: a record of its own",
+   "on": [
+    "test.live-own"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-own"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-own added"
+    ],
+    "modloader": [
+     "has a record of its own"
+    ]
+   }
+  },
+  {
+   "name": "own: a record another mod holds a field of",
+   "on": [
+    "test.live-own-held"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "holds a field of the record"
+   },
+   "runs_not": [
+    "test.live-own-held"
+   ]
+  },
+  {
+   "name": "network types: widen (machine gun 10k)",
+   "on": [
+    "test.live-net"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-net"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-net added"
+    ]
+   }
+  },
+  {
+   "name": "network types: narrow back",
+   "off": [
+    "test.live-net"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs_not": [
+    "test.live-net"
+   ]
+  },
+  {
+   "name": "live code: add",
+   "on": [
+    "test.live-code"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-code"
+   ],
+   "logs": {
+    "mod:test.live-code": [
+     "Machine Gun 10k for game build",
+     "deposit_value holds up to 16383",
+     "capacity 10000"
+    ]
+   }
+  },
+  {
+   "name": "live code: remove (hellforge_mod_unload)",
+   "off": [
+    "test.live-code"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs_not": [
+    "test.live-code"
+   ],
+   "logs": {
+    "mod:test.live-code": [
+     "unloaded, reason"
+    ]
+   }
+  },
+  {
+   "name": "live code: the same DLL again",
+   "on": [
+    "test.live-code"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-code"
+   ],
+   "logs": {
+    "mod:test.live-code": [
+     "Machine Gun 10k for game build"
+    ]
+   }
+  },
+  {
+   "name": "refused: code without \"live\"",
+   "on": [
+    "test.live-nolive"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "does not declare"
+   },
+   "runs_not": [
+    "test.live-nolive"
+   ]
+  },
+  {
+   "name": "refused: removing boot code without \"live\"",
+   "off": [
+    "skyeshade.vanilla-plus"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "did not declare"
+   },
+   "runs": [
+    "skyeshade.vanilla-plus"
+   ]
+  },
+  {
+   "name": "refused: Hell Forge (SDK 5)",
+   "on": [
+    "skyeshade.hell-forge"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "does not declare"
+   }
+  },
+  {
+   "name": "refused: Hell Forge's larger maps (SDK 16 live)",
+   "on": [
+    "test.live-hellforge"
+   ],
+   "expect": {
+    "applied": false
+   },
+   "runs_not": [
+    "test.live-hellforge"
+   ]
+  },
+  {
+   "name": "all or nothing: a live mod with a refused one",
+   "on": [
+    "test.live-net",
+    "test.live-nolive"
+   ],
+   "expect": {
+    "applied": false
+   },
+   "runs_not": [
+    "test.live-net",
+    "test.live-nolive"
+   ]
+  },
+  {
+   "name": "after the refusals nothing is pending",
+   "preview": true,
+   "expect": {
+    "detail": "Nothing changed."
+   }
+  },
+  {
+   "name": "refused: a new load order",
+   "order": "reverse",
+   "expect": {
+    "applied": false,
+    "blocking": "order changed"
+   }
+  },
+  {
+   "name": "weapon with a model: add (hot package; the lowest resource id, so the first short id)",
+   "on": [
+    "test.live-cube"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-cube"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-cube added",
+     "hot package"
+    ]
+   }
+  },
+  {
+   "name": "stratagem and entity with a model: add (hot package)",
+   "on": [
+    "test.live-sentry"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-sentry"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-sentry added",
+     "hot package"
+    ],
+    "modloader": [
+     "stratagems: the list moved"
+    ]
+   }
+  },
+  {
+   "name": "refused: a stratagem a boot would number before a staying one",
+   "on": [
+    "test.live-categories"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "numbers it"
+   },
+   "runs_not": [
+    "test.live-categories"
+   ]
+  },
+  {
+   "name": "stratagem and entity: remove (tombstones, item given back)",
+   "off": [
+    "test.live-sentry"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs_not": [
+    "test.live-sentry"
+   ],
+   "logs": {
+    "modloader": [
+     "1 given back"
+    ]
+   }
+  },
+  {
+   "name": "refused: a stratagem a boot would number where a removed one's tombstone is",
+   "on": [
+    "test.live-categories"
+   ],
+   "expect": {
+    "applied": false,
+    "blocking": "taken out this session"
+   },
+   "runs_not": [
+    "test.live-categories"
+   ]
+  },
+  {
+   "name": "level 11 without larger maps: add",
+   "on": [
+    "test.live-level11"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-level11"
+   ],
+   "logs": {
+    "mod:test.live-level11": [
+     "add_difficulty: 11"
+    ],
+    "modloader": [
+     "live content:",
+     "online highest level"
+    ]
+   }
+  },
+  {
+   "name": "refused: taking level 11 out",
+   "off": [
+    "test.live-level11"
+   ],
+   "expect": {
+    "applied": false
+   },
+   "runs": [
+    "test.live-level11"
+   ]
+  },
+  {
+   "name": "stats: remove after the cube gun's registration moved tables",
+   "off": [
+    "test.live-stats"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs_not": [
+    "test.live-stats"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-stats removed, 0 stats edit(s) applied, 0 refused"
+    ]
+   }
+  },
+  {
+   "name": "stats: back on",
+   "on": [
+    "test.live-stats"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-stats"
+   ],
+   "logs": {
+    "live-mods": [
+     "test.live-stats added, 15 stats edit(s) applied, 0 refused"
+    ]
+   }
+  },
+  {
+   "name": "two changes at once",
+   "off": [
+    "test.live-stats"
+   ],
+   "requests": 2,
+   "runs_not": [
+    "test.live-stats"
+   ]
+  },
+  {
+   "name": "several mods in one change",
+   "on": [
+    "test.live-stats",
+    "test.live-net"
+   ],
+   "off": [
+    "test.live-code"
+   ],
+   "expect": {
+    "applied": true
+   },
+   "runs": [
+    "test.live-stats",
+    "test.live-net"
+   ],
+   "runs_not": [
+    "test.live-code"
+   ]
+  },
+  {
+   "name": "settled: nothing pending",
+   "preview": true,
+   "expect": {
+    "detail": "Nothing changed."
+   }
+  }
+ ]
+}

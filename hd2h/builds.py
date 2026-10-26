@@ -80,6 +80,10 @@ KNOWN = {
             Signature('helldivers2.exe', 0x626296, ACCESS_VIOLATION, 'quit-render-task-pool',
                       'window closed after play: the render task pool runs out during teardown; vanilla, no mod '
                       'frames'),
+            Signature('helldivers2.exe', 0x5B7A43, ACCESS_VIOLATION, 'quit-freed-object',
+                      'quit after play with a weapon a mod registered: the engine shutdown reads a scratch allocator '
+                      'given back early (cmp [rbx+50h]); the field lists of an added network type were freed twice (fixed '
+                      'in HellForge PR #64)'),
             Signature('game.dll', 0x5B3746, ACCESS_VIOLATION, 'set-destination-removed-entity',
                       'set_destination (game 0x5B36C0) called for an entity whose navigation record was removed: '
                       'a test mod ordered a squad killed or disbanded mid-trial (2026-10-14; it checks the record '

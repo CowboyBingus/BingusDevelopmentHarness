@@ -1,0 +1,13 @@
+{
+  "about": "HellForge live mod sync: items made owned on the ship, solo, from the setup baseline (every test mod off). A live weapon first (its items found on the game thread), a live level 11 (level 10's unlock item copied), the weapon given back and owned again on its return.",
+  "steps": [
+    {"name": "weapon first: its items added and owned", "on": ["test.live-cube"], "expect": {"applied": true},
+     "logs": {"modloader": ["1 item(s) owned"]}, "not_logs": {"modloader": ["items: "]}},
+    {"name": "level 11: its unlock item added and owned", "on": ["test.live-level11"], "expect": {"applied": true},
+     "logs": {"modloader": ["1 catalogue record(s) added, 1 item(s) owned", "online highest level is 11"]}, "not_logs": {"modloader": ["items: "]}},
+    {"name": "weapon out: given back", "off": ["test.live-cube"], "expect": {"applied": true}, "logs": {"modloader": ["1 given back"]}},
+    {"name": "weapon back: owned again", "on": ["test.live-cube"], "expect": {"applied": true},
+     "logs": {"modloader": ["1 item(s) owned"], "mod:test.live-cube": ["its registration is kept"]}, "not_logs": {"modloader": ["items: "]}},
+    {"name": "settled", "preview": true, "expect": {"detail": "Nothing changed."}}
+  ]
+}

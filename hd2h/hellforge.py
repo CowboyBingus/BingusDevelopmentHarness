@@ -268,12 +268,22 @@ def _spawn(arguments, paths, run_dir):
     temp = Path(paths.hellforge) / 'temp'
     temp.mkdir(exist_ok=True)
     environment['TEMP'] = environment['TMP'] = str(temp)
+    # the runner's own checks run Windows PowerShell 5.1; an inherited PowerShell 7 module path breaks them
+    environment['PSModulePath'] = windows_powershell_modules()
     try:
         return subprocess.Popen(arguments, cwd=str(paths.hellforge), env=environment, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                 creationflags=CREATE_NO_WINDOW).pid
     except OSError as error:
         raise HellForgeError('could not start %s: %s' % (arguments[0], error))
+
+
+def windows_powershell_modules():
+    """Windows PowerShell 5.1's module path, as a fresh session inherits it: the user's modules, then the machine's."""
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\Session Manager\Environment') as key:
+        machine = os.path.expandvars(winreg.QueryValueEx(key, 'PSModulePath')[0])
+    return os.path.expandvars(r'%USERPROFILE%\Documents\WindowsPowerShell\Modules;') + machine
 
 
 def steam_pid_mismatch():

@@ -1,0 +1,10 @@
+{
+  "about": "HellForge live mod sync: a live weapon after a mission (needs test.live-cube on from ship.json): taken out on the ship (tombstone, loadout scrub), then back (its own number again).",
+  "steps": [
+    {"name": "weapon: remove after a mission (tombstone, loadout scrub)", "off": ["test.live-cube"], "expect": {"applied": true},
+     "runs_not": ["test.live-cube"]},
+    {"name": "weapon: back (the same mod's entry stands in)", "on": ["test.live-cube"], "expect": {"applied": true},
+     "runs": ["test.live-cube"]},
+    {"name": "weapon: nothing pending", "preview": true, "expect": {"detail": "Nothing changed."}}
+  ]
+}

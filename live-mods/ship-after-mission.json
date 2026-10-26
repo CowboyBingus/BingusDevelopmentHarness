@@ -1,0 +1,9 @@
+{
+  "about": "HellForge live mod sync back on the ship after mission.json and `harness.py leave`: what waited goes now.",
+  "steps": [
+    {"name": "ship again: network types narrow", "off": ["test.live-net"], "expect": {"applied": true}, "runs_not": ["test.live-net"]},
+    {"name": "ship again: live code on", "on": ["test.live-code"], "expect": {"applied": true}, "runs": ["test.live-code"],
+     "logs": {"mod:test.live-code": ["Machine Gun 10k for game build"]}},
+    {"name": "ship again: nothing pending", "preview": true, "expect": {"detail": "Nothing changed."}}
+  ]
+}

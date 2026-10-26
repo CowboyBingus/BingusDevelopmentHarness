@@ -1,0 +1,14 @@
+{
+  "about": "HellForge live mod sync in a mission (after ship.json and `harness.py mission`): stats change at once, anything else waits for the ship.",
+  "steps": [
+    {"name": "mission: stats remove", "off": ["test.live-stats"], "expect": {"applied": true}, "runs_not": ["test.live-stats"],
+     "logs": {"live-mods": ["test.live-stats removed, 0 stats edit(s) applied, 0 refused"]}},
+    {"name": "mission: stats add", "on": ["test.live-stats"], "expect": {"applied": true}, "runs": ["test.live-stats"],
+     "logs": {"live-mods": ["test.live-stats added, 15 stats edit(s) applied, 0 refused"]}},
+    {"name": "mission: refused, network types wait for the ship", "off": ["test.live-net"],
+     "expect": {"applied": false, "blocking": "waits for the ship"}, "runs": ["test.live-net"]},
+    {"name": "mission: refused, live code waits for the ship", "on": ["test.live-code"],
+     "expect": {"applied": false, "blocking": "waits for the ship"}, "runs_not": ["test.live-code"]},
+    {"name": "mission: nothing pending after the refusals", "preview": true, "expect": {"detail": "Nothing changed."}}
+  ]
+}
