@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -18,6 +19,7 @@ from hd2h.paths import Paths
 from test_hellforge import fake_hellforge
 
 IS_WINDOWS = sys.platform == 'win32'
+FAKE_WRAPPER = Path(__file__).with_name('fake_hellforge_linux.sh')
 if not IS_WINDOWS:
     from hd2h import _winapi_linux
 
@@ -150,7 +152,7 @@ class SpawnLinux(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = fake_hellforge(tmp)
             wrapper = paths.hellforge / 'app' / 'linux' / 'hellforge-linux.sh'
-            wrapper.parent.mkdir(parents=True)
+            wrapper.parent.mkdir(parents=True, exist_ok=True)
             wrapper.write_text('#!/bin/sh\n')
             with mock.patch('hd2h.hellforge.subprocess.Popen', SpawnLinux.Popen), \
                     mock.patch.dict(os.environ, {'PSModulePath': 'C:\\PowerShell\\Modules'}, clear=False):
@@ -171,6 +173,7 @@ class SpawnLinux(unittest.TestCase):
     def test_missing_wrapper_is_a_clear_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = fake_hellforge(tmp)
+            (paths.hellforge / 'app' / 'linux' / 'hellforge-linux.sh').unlink()
             with self.assertRaisesRegex(hellforge.HellForgeError, 'Linux session wrapper is missing'):
                 hellforge._spawn(hellforge.session_arguments(paths), paths, None)
 
@@ -186,6 +189,95 @@ class SpawnLinux(unittest.TestCase):
             with mock.patch('hd2h.hellforge.winapi.processes', lambda name: list(images)), \
                     mock.patch('hd2h.hellforge.winapi.image_path', lambda pid, root=None: images[pid]):
                 self.assertEqual(hellforge.copy_games(paths), [11])
+
+
+def _process_gone(pid):
+    """True once a PID has no /proc entry or is a zombie (an orphan's parent has not reaped it yet)."""
+    try:
+        fields = Path('/proc/%d/stat' % pid).read_text().rpartition(')')[2].split()
+    except OSError:
+        return True
+    return bool(fields) and fields[0] == 'Z'
+
+
+@unittest.skipIf(IS_WINDOWS, 'the Linux wrapper')
+class WrapperLinux(unittest.TestCase):
+    """The installation's wrapper is tests/fake_hellforge_linux.sh; it starts no Proton, Steam or game."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.paths = fake_hellforge(self.tmp.name, inside_prefix=True, wrapper=FAKE_WRAPPER)
+        self.runner = self.child = None
+
+    def tearDown(self):
+        for pid in (self.child, self.runner):
+            if pid and not _process_gone(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        self.tmp.cleanup()
+
+    def start(self, **environment):
+        with mock.patch.dict(os.environ, environment, clear=False), \
+                mock.patch('hd2h.hellforge.copy_games', lambda paths: [999999]):
+            runner, _game, run_id, run = hellforge.launch(self.paths, None, timeout=15)
+        self.runner = runner
+        return runner, run_id, Path(run)
+
+    def test_a_c_run_path_comes_through_the_installations_own_prefix(self):
+        runner, run_id, run = self.start()
+        expected = self.paths.hellforge / 'logs' / 'sessions' / run_id
+        self.assertEqual(run, expected)
+        pointer = json.loads(self.paths.play_session.read_text())
+        self.assertEqual(pointer['run'][:2], 'C:', 'the fake wrapper publishes a C: run path')
+        self.assertNotIn('/', pointer['run'])
+        self.assertEqual(hellforge.current_run(self.paths), (run_id, expected))
+        self.assertNotIn('/Steam/steamapps/compatdata', str(run), 'not the Steam default prefix')
+        self.assertEqual(hellforge.end_runner({'runner_pid': runner, 'hellforge_run': str(run)},
+                                              wait=0, after_signal=10), 'signalled')
+        self.assertTrue(hellforge.wait_runner(runner, 5))
+        self.assertEqual(hellforge.result(run).get('status'), 'observed')
+        self.assertTrue(Path(run, hellforge.STOP_SIGNAL).exists())
+
+    def test_a_wrapper_that_ignores_stop_is_ended_with_its_group(self):
+        runner, _run_id, run = self.start(HD2H_FAKE_IGNORE_STOP='1', HD2H_FAKE_CHILD='1')
+        child_file = self.paths.hellforge / 'logs' / 'fake-child.pid'
+        deadline = time.monotonic() + 5
+        while not child_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(child_file.exists(), 'the fake wrapper did not start its child')
+        self.child = int(child_file.read_text())
+        self.assertEqual(hellforge.end_runner({'runner_pid': runner, 'hellforge_run': str(run)},
+                                              wait=0, after_signal=0.2), 'killed')
+        self.assertTrue(hellforge.wait_runner(runner, 5))
+        deadline = time.monotonic() + 5
+        while not _process_gone(self.child) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(_process_gone(self.child), 'the wrapper child survived the process-group kill')
+        self.child = None
+
+    def test_discovery_names_both_missing_files(self):
+        marker = self.paths.hellforge / 'hellforge-install.json'
+        wrapper = self.paths.hellforge / 'app' / 'linux' / 'hellforge-linux.sh'
+        marker.unlink()
+        wrapper.unlink()
+        with self.assertRaises(hellforge.HellForgeError) as raised:
+            hellforge.facts(self.paths)
+        self.assertIn(str(marker), str(raised.exception))
+        self.assertIn(str(wrapper), str(raised.exception))
+
+    def test_discovery_names_a_missing_wrapper_when_the_marker_is_there(self):
+        wrapper = self.paths.hellforge / 'app' / 'linux' / 'hellforge-linux.sh'
+        wrapper.unlink()
+        with self.assertRaises(hellforge.HellForgeError) as raised:
+            hellforge.facts(self.paths)
+        self.assertIn(str(wrapper), str(raised.exception))
+        self.assertNotIn('hellforge-install.json', str(raised.exception))
+
+    def test_a_launch_failure_surfaces_the_wrapper_log(self):
+        (self.paths.hellforge / 'logs' / 'linux-session-wrapper.log').write_text('no bridge sockets found\n')
+        self.assertIn('no bridge sockets found', hellforge._launch_failure(self.paths, None))
 
 
 @unittest.skipIf(IS_WINDOWS, 'the Linux platform layer')

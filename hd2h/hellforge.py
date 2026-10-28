@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -41,6 +42,9 @@ LOADER_ZIP = Path(os.environ.get('HD2H_LOADER_ZIP') or HARNESS.parent / 'release
 STOP_SIGNAL = 'stop-observation.signal'
 CREATE_NO_WINDOW = 0x08000000
 IS_WINDOWS = sys.platform == 'win32'
+# Popen objects of wrappers this process started, kept so their exit is reaped and a discarded object cannot warn
+# "subprocess is still running" while the wrapper runs.
+_LINUX_WRAPPERS = {}
 
 
 class HellForgeError(RuntimeError):
@@ -88,7 +92,12 @@ def to_wine_path(host, prefix=None):
 
 def to_host_path(value, prefix=None):
     """The host path of a Wine path (C:\\... through the prefix, Z:\\... as /...); other values are returned as they
-    are."""
+    are.
+
+    A C:\\ path belongs to the prefix that wrote it. Callers passing an installation's files use
+    installation_host_path, which always uses that installation's own prefix; the Steam default is only a fallback for
+    a path with no installation.
+    """
     text = str(value)
     if not (len(text) >= 3 and text[0].upper() in ('C', 'Z') and text[1] == ':' and text[2] in ('\\', '/')):
         return text
@@ -99,6 +108,12 @@ def to_host_path(value, prefix=None):
     else:
         target = Path('/') / rest
     return os.path.realpath(str(target))
+
+
+def installation_host_path(paths, value):
+    """The host path of a path a HellForge installation wrote: C:\\ through the installation's own prefix, Z:\\ as
+    /...."""
+    return to_host_path(value, wine_prefix(paths.hellforge))
 
 
 def linux_wrapper(paths):
@@ -158,9 +173,21 @@ def facts(paths):
     """The installation's facts; raises HellForgeError when a session cannot start."""
     if paths.hellforge is None or not Path(paths.hellforge).is_dir():
         raise HellForgeError('no HellForge installation at %s' % paths.hellforge)
-    install = _json(paths.hellforge / 'hellforge-install.json')
-    if install is None:
-        raise HellForgeError('%s is not a HellForge installation (no hellforge-install.json)' % paths.hellforge)
+    marker = Path(paths.hellforge) / 'hellforge-install.json'
+    if IS_WINDOWS:
+        install = _json(marker)
+        if install is None:
+            raise HellForgeError('%s is not a HellForge installation (no hellforge-install.json)' % paths.hellforge)
+    else:
+        # The Linux wrapper is the supported start route; name every file that is missing, not just the first.
+        missing = [str(required) for required in (marker, linux_wrapper(paths)) if not Path(required).exists()]
+        if missing:
+            raise HellForgeError('%s is not a HellForge installation: missing %s'
+                                 % (paths.hellforge, ', '.join(missing)))
+        install = _json(marker)
+        if install is None:
+            raise HellForgeError('%s is not a HellForge installation (%s is not a valid install marker)'
+                                 % (paths.hellforge, marker))
     for required in (paths.session_runner, paths.hellforge_profile):
         if not Path(required).exists():
             raise HellForgeError('missing %s' % required)
@@ -340,7 +367,7 @@ def current_run(paths):
     pointer = _json(paths.play_session) or {}
     run = pointer.get('run')
     if run and not IS_WINDOWS:
-        run = to_host_path(run, wine_prefix(paths.hellforge))
+        run = installation_host_path(paths, run)
     return pointer.get('runId'), (Path(run) if run else None)
 
 
@@ -349,12 +376,35 @@ def result(run):
     return (_json(Path(run) / 'result.json') or {}) if run else {}
 
 
-def _runner_log_tail(paths, lines=5):
-    log = paths.hellforge / 'logs' / 'session-runner.log'
+def _tail(path, lines=5):
     try:
-        return ' | '.join(log.read_text(encoding='utf-8', errors='replace').splitlines()[-lines:])
+        return ' | '.join(Path(path).read_text(encoding='utf-8', errors='replace').splitlines()[-lines:])
     except OSError:
         return ''
+
+
+def _runner_log_tail(paths, lines=5):
+    return _tail(Path(paths.hellforge) / 'logs' / 'session-runner.log', lines)
+
+
+def _wrapper_log_tail(paths, lines=5):
+    """The Linux wrapper's own log; a failure before the run folder opens is often only here."""
+    return _tail(Path(paths.hellforge) / 'logs' / 'linux-session-wrapper.log', lines)
+
+
+def _launch_failure(paths, run):
+    """The runner's result or the logs that explain a launch that stopped before the game started."""
+    failure = result(run).get('failure') if run else None
+    if failure:
+        return failure
+    if IS_WINDOWS:
+        return _runner_log_tail(paths) or 'no reason given'
+    tails = []
+    for name, tail in (('session-runner.log', _runner_log_tail(paths)),
+                       ('linux-session-wrapper.log', _wrapper_log_tail(paths))):
+        if tail:
+            tails.append('%s: %s' % (name, tail))
+    return ' | '.join(tails) or 'no reason given'
 
 
 def _spawn_windows(arguments, paths, run_dir):
@@ -382,9 +432,11 @@ def _spawn_linux(arguments, paths, run_dir):
         raise HellForgeError('the Linux session wrapper is missing: %s' % wrapper)
     try:
         environment = linux_environment(paths)
-        return subprocess.Popen(linux_command(arguments, paths), cwd=str(paths.hellforge), env=environment,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                start_new_session=True).pid
+        process = subprocess.Popen(linux_command(arguments, paths), cwd=str(paths.hellforge), env=environment,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        _LINUX_WRAPPERS[process.pid] = process
+        return process.pid
     except OSError as error:
         raise HellForgeError('could not start %s: %s' % (wrapper, error))
 
@@ -470,11 +522,13 @@ def launch(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, 
         if fresh and games:
             return runner, games[0], run_id, run
         if not _pid_alive(runner):
-            failure = result(run).get('failure') if fresh else None
-            raise HellForgeError('the session runner exited before the game started: %s'
-                                 % (failure or _runner_log_tail(paths) or 'no reason given'))
+            failure = _launch_failure(paths, run if fresh else None)
+            raise HellForgeError('the session runner exited before the game started: %s' % failure)
         time.sleep(1)
-    raise HellForgeError('the game did not start within %d s (session runner pid %d)' % (timeout, runner))
+    if IS_WINDOWS:
+        raise HellForgeError('the game did not start within %d s (session runner pid %d)' % (timeout, runner))
+    raise HellForgeError('the game did not start within %d s (session runner pid %d): %s'
+                         % (timeout, runner, _launch_failure(paths, None)))
 
 
 def signal_stop(run):
@@ -498,6 +552,16 @@ def _wait_runner_linux(pid, timeout):
     """True once the wrapper (the Linux runner pid) has exited, or cannot be opened, which means it is gone."""
     if not pid:
         return True
+    process = _LINUX_WRAPPERS.get(pid)
+    if process is not None and hasattr(process, 'wait'):
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        except OSError:
+            pass
+        _LINUX_WRAPPERS.pop(pid, None)
+        return True
     try:
         with winapi.Process(pid) as process:
             return process.wait(timeout)
@@ -508,9 +572,20 @@ def _wait_runner_linux(pid, timeout):
 wait_runner = _wait_runner_windows if IS_WINDOWS else _wait_runner_linux
 
 
-def abort_runner(manifest, note=print, wait=60):
-    """Ends a runner whose start failed part-way: the stop signal when its run folder exists, else (before it
-    started the game) a kill. Returns True once it is gone."""
+def _signal_runner_group(pid, sig):
+    """Sends a signal to the process group the Linux wrapper leads, or to the process alone when it leads none.
+    Returns whether the signal was sent."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def _abort_runner_windows(manifest, note, wait):
     pid = manifest.get('runner_pid')
     if wait_runner(pid, 0):
         return True
@@ -523,15 +598,62 @@ def abort_runner(manifest, note=print, wait=60):
     return wait_runner(pid, 30)
 
 
-def end_runner(manifest, note=print, wait=120, after_signal=60):
-    """Lets the runner finish once the game is gone (it stops the backend and restores the copy); asks it to stop
-    when it does not. Returns how it ended: 'exited', 'signalled' or 'still-running'."""
+def _abort_runner_linux(manifest, note, wait):
+    """The stop signal first when the run folder exists, then the wrapper's whole group (hf-inner, Proton, the game
+    and the backend), never just the wrapper."""
+    pid = manifest.get('runner_pid')
+    if wait_runner(pid, 0):
+        return True
+    if manifest.get('hellforge_run'):
+        signal_stop(manifest['hellforge_run'])
+        if wait_runner(pid, wait):
+            return True
+    note('ending the session runner pid %d and its process group' % pid)
+    if _signal_runner_group(pid, signal.SIGTERM) and wait_runner(pid, 30):
+        return True
+    _signal_runner_group(pid, signal.SIGKILL)
+    return wait_runner(pid, 30)
+
+
+def abort_runner(manifest, note=print, wait=60):
+    """Ends a runner whose start failed part-way: the stop signal when its run folder exists, else (before it
+    started the game) a kill. On Linux the kill reaches the wrapper's process group. Returns True once it is gone."""
+    if IS_WINDOWS:
+        return _abort_runner_windows(manifest, note, wait)
+    return _abort_runner_linux(manifest, note, wait)
+
+
+def _end_runner_windows(manifest, note, wait, after_signal):
     pid = manifest.get('runner_pid')
     if wait_runner(pid, wait):
         return 'exited'
     note('the session runner is still running; asking it to stop')
     signal_stop(manifest.get('hellforge_run'))
     return 'signalled' if wait_runner(pid, after_signal) else 'still-running'
+
+
+def _end_runner_linux(manifest, note, wait, after_signal):
+    pid = manifest.get('runner_pid')
+    if wait_runner(pid, wait):
+        return 'exited'
+    note('the session runner is still running; asking it to stop')
+    signal_stop(manifest.get('hellforge_run'))
+    if wait_runner(pid, after_signal):
+        return 'signalled'
+    note('the Linux session wrapper pid %d did not stop; ending its process group' % pid)
+    if _signal_runner_group(pid, signal.SIGTERM) and wait_runner(pid, 30):
+        return 'killed'
+    _signal_runner_group(pid, signal.SIGKILL)
+    return 'exited' if wait_runner(pid, 30) else 'still-running'
+
+
+def end_runner(manifest, note=print, wait=120, after_signal=60):
+    """Lets the runner finish once the game is gone (it stops the backend and restores the copy); asks it to stop
+    when it does not. On Linux, only after the stop signal has timed out is the wrapper's process group signalled
+    (SIGTERM, then SIGKILL). Returns how it ended: 'exited', 'signalled', 'killed' or 'still-running'."""
+    if IS_WINDOWS:
+        return _end_runner_windows(manifest, note, wait, after_signal)
+    return _end_runner_linux(manifest, note, wait, after_signal)
 
 
 def collect(run, target):

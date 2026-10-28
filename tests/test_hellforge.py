@@ -23,15 +23,22 @@ LOADER_MANIFEST = b'{"Name": "Bingus Shared Loader", "Builds": ["25480438"]}'
 LOADER_PATCH = archive.make_archive({archive.LOADER_CALLBACKS: b'\x01\0\0\0\x02\0\0\0x'})
 
 
-def fake_hellforge(tmp, own_loader=False, mods_settings=True):
+def fake_hellforge(tmp, own_loader=False, mods_settings=True, inside_prefix=False, wrapper=None):
     """A HellForge installation as Setup leaves it, with two profile files (the game's own and an imported one)."""
-    root = Path(tmp) / 'HellForge'
+    if inside_prefix:
+        root = (Path(tmp) / 'hellforge-prefix' / 'pfx' / 'drive_c' / 'users' / 'steamuser' / 'Documents' /
+                'HellForge')
+    else:
+        root = Path(tmp) / 'HellForge'
     (root / 'game' / 'bin').mkdir(parents=True)
     (root / 'game' / 'bin' / 'helldivers2.exe').write_bytes(b'exe')
     (root / 'game' / 'data' / 'game').mkdir(parents=True)
     (root / 'game' / 'data' / 'game' / 'game.dll').write_bytes(b'dll')
     (root / 'app' / 'session').mkdir(parents=True)
     (root / 'app' / 'session' / 'HellForge.Session.exe').write_bytes(b'runner')
+    (root / 'app' / 'linux').mkdir(parents=True)
+    (root / 'app' / 'linux' / 'hellforge-linux.sh').write_bytes(
+        Path(wrapper).read_bytes() if wrapper else b'#!/bin/sh\nexit 0\n')
     (root / 'hellforge-install.json').write_text('{"schemaVersion": 1, "buildId": "25480438"}')
     (root / 'launcher-settings.json').write_text(json.dumps(
         {'selectedProfile': 'alpha', 'localPlayFab': True, 'sdkShims': True, 'war': 'live', 'engineLog': True}))
