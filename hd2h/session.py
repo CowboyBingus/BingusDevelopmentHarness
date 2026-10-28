@@ -639,6 +639,9 @@ def _finish(paths, note):
                              'status': outcome.get('status'), 'failure': outcome.get('failure'),
                              'runner_end': manifest.get('runner_end'),
                              'files_collected': hellforge.collect(run, run_dir / 'hellforge-session')}
+        if not IS_WINDOWS:
+            # The wrapper and the runner outlive the game: result.json is the reliable exit code on Linux.
+            hellforge_summary['game_exit_code'] = outcome.get('gameExitCode')
     before = manifest.get('dumps_before') or {}
     new_dumps = []
     for name, size in sorted(dumps.listing(paths.dumps).items()):
@@ -658,6 +661,9 @@ def _finish(paths, note):
     problems = teardown(paths)
     new_saves = settings.new_save_files(paths, manifest['settings']) if manifest.get('settings') else []
     exit_info = manifest.get('exit') or {}
+    if hellforge_summary and not IS_WINDOWS and exit_info.get('code') is None:
+        if hellforge_summary.get('game_exit_code') is not None:
+            exit_info = dict(exit_info, code=hellforge_summary['game_exit_code'])
     crashed = [d for d in new_dumps if d.get('kind') not in ('other',)]
     if crashed:
         outcome = 'crash'

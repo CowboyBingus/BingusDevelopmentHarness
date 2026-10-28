@@ -25,9 +25,10 @@
   python harness.py build-agent <folder>       write the agent patch files without deploying them
 
 Targets: --target steam (the default; or HD2H_TARGET) drives the Steam install; --target hellforge drives a
-HellForge installation's game copy (--hellforge-root, default C:\\HellForge; --profile, default the launcher's
-selected profile): its session runner launches the copy, and the agent and Bingus Shared Loader go into the
-installation's mods/ as packs (hd2h/hellforge.py). Commands after start follow the recorded session's target.
+HellForge installation's game copy (--hellforge-root, default HD2H_HELLFORGE_ROOT or the platform's installation;
+--profile, default the launcher's selected profile): its session runner launches the copy, and the agent and Bingus
+Shared Loader go into the installation's mods/ as packs (hd2h/hellforge.py). Commands after start follow the recorded
+session's target. On Linux only the hellforge target runs; see README.md.
 
 start, smoke and soak close a running game first (gracefully, then by force) unless given
 --keep-running. Files are only changed while the game is closed. Every change is recorded in
@@ -172,7 +173,8 @@ def main(argv=None):
     parser.add_argument('--target', choices=TARGETS,
                         help='steam or hellforge (default: HD2H_TARGET, else steam; later commands follow the '
                              'recorded session)')
-    parser.add_argument('--hellforge-root', help='HellForge installation (default: HD2H_HELLFORGE_ROOT or C:\\HellForge)')
+    parser.add_argument('--hellforge-root', help='HellForge installation (default: HD2H_HELLFORGE_ROOT or the '
+                                                "platform's installation)")
     parser.add_argument('--profile', help="HellForge profile (default: HD2H_HELLFORGE_PROFILE or the launcher's)")
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('preflight')
