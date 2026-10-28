@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import argparse
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -113,6 +114,7 @@ class Paths_(unittest.TestCase):
                 self.assertEqual(Paths.from_environment().hellforge, paths.hellforge)
             self.assertEqual(Paths.from_environment('steam').target, 'steam')
 
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows hands the runner host paths')
     def test_session_arguments_follow_the_launcher(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = fake_hellforge(tmp)
@@ -127,6 +129,18 @@ class Paths_(unittest.TestCase):
             self.assertNotIn('--local-playfab', solo)
             self.assertIn('--open-war', solo)
             self.assertNotIn('--live-war', hellforge.session_arguments(paths, war='frozen'))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Linux hands the runner Wine paths')
+    def test_session_arguments_use_wine_paths_on_linux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_hellforge(tmp)
+            arguments = hellforge.session_arguments(paths)
+            self.assertEqual(arguments[:2], [str(paths.session_runner), 'play'])
+            self.assertEqual(arguments[3], hellforge.to_wine_path(paths.hellforge))
+            self.assertEqual(arguments[5], hellforge.to_wine_path(paths.hellforge_profile))
+            self.assertEqual(arguments[arguments.index('--live-war') + 1],
+                             hellforge.to_wine_path(paths.hellforge / 'live-war.json'))
+            self.assertTrue(arguments[3].startswith('Z:'), 'the temporary install is outside a Proton prefix')
 
 
 class Packs(unittest.TestCase):
@@ -306,6 +320,7 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('STEAM NOT DETECTED', str(raised.exception))
 
 
+@unittest.skipUnless(sys.platform == 'win32', 'the Steam ActiveProcess check reads the Windows registry')
 class SteamPid(unittest.TestCase):
     def check(self, registry_pid, running):
         class Key:

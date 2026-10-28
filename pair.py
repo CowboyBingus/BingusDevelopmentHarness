@@ -11,7 +11,7 @@ import argparse
 import json
 import sys
 
-from hd2h import pair
+from hd2h import capture, pair, winapi
 
 
 def main():
@@ -42,7 +42,7 @@ def main():
             print(json.dumps(verdict, indent=2))
             return 0 if verdict.get('found') else 1
         return 1 if pair.stop() else 0
-    except (pair.PairError, pair.hellforge.HellForgeError) as error:
+    except (pair.PairError, pair.hellforge.HellForgeError, capture.CaptureError, winapi.WinError) as error:
         print('pair: ' + str(error) + ' (pair.py stop undoes what was done)', file=sys.stderr)
         return 2
 
