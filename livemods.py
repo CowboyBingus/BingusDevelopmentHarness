@@ -22,7 +22,7 @@ from pathlib import Path
 import sys
 import time
 
-from hd2h import hellforge, livemods, session
+from hd2h import hellforge, livemods, session, winapi
 from hd2h.paths import HARNESS, Paths
 from hd2h.state import State
 
@@ -95,7 +95,7 @@ def main(argv=None):
                 return 2
             print(json.dumps(verdict, indent=2, default=str))
             return 0 if verdict.get('live') and verdict.get('rejoined') else 1
-    except (livemods.LiveModsError, hellforge.HellForgeError, session.HarnessError) as error:
+    except (livemods.LiveModsError, hellforge.HellForgeError, session.HarnessError, winapi.WinError) as error:
         note('error: %s' % error)
         return 2
     return 0

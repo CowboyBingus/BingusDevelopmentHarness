@@ -22,10 +22,11 @@ calls game functions from a Lua mod; use it at your own risk, on your own accoun
 
 ## Requirements
 
-- Windows (the harness uses Win32 through `ctypes` and the registry through `winreg`).
+- Windows, or Linux for the HellForge target (see Linux below). On Windows the harness uses Win32 through `ctypes`
+  and the registry through `winreg`; on Linux it uses `/proc` and X11.
 - Python 3.10 or later (tested with 3.13). Standard library only: nothing to install.
-- A HellForge installation whose game copy is build 25480438 (default `C:\HellForge`; see HellForge target below),
-  with Steam running: the copy checks game ownership through it.
+- A HellForge installation whose game copy is build 25480438 (default `C:\HellForge` on Windows; on Linux see the
+  default below), with Steam running: the copy checks game ownership through it.
 - The [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader) v20 manager ZIP (`HD2H_LOADER_ZIP`),
   unless the installation already has the loader enabled: it starts the agent.
 - The `steam` target drives a Steam install (default folder
@@ -153,7 +154,8 @@ Game memory is only read, with read-only process rights (`PROCESS_QUERY_INFORMAT
 `--target hellforge` (or `HD2H_TARGET=hellforge`) drives a HellForge installation's game copy instead of the Steam
 install (`hd2h/hellforge.py`). Options:
 
-- `--hellforge-root`: the installation, default `C:\HellForge`.
+- `--hellforge-root`: the installation, default `C:\HellForge` on Windows and
+  `~/.local/share/hellforge-prefix/pfx/drive_c/users/steamuser/Documents/HellForge` on Linux (see Linux below).
 - `--profile`: the profile, default the launcher's selected one.
 - On `start` and `smoke`, `--multiplayer launcher|on|off` and `--war launcher|live|open|frozen`. Both default to the
   launcher's settings.
@@ -193,6 +195,71 @@ How it differs from the Steam target:
   the Steam target, and on HellForge unless Local PlayFab and the multiplayer stand-ins are both on: without them a
   HellForge game searches the app's Steam lobbies, which vanilla games publish too, under the same build string.
   `mission` then expects the Public lobby. A Public HellForge game's own Steam lobby is publicly listed (2026-10-22).
+
+## Linux
+
+The `hellforge` target also runs on Linux: HellForge's launcher is native and the game runs under Proton. Nothing here
+has run against a real session yet; the Linux session path is covered by a fake wrapper in the tests. The `steam` target
+remains Windows-only and its `start` says so.
+
+Requirements:
+
+- Linux with Steam running and signed in, and a HellForge installation that includes `app/linux/hellforge-linux.sh`.
+  Discovery requires both `hellforge-install.json` and that wrapper; the error names the missing file.
+- Python 3.10 or later, standard library only.
+- The wrapper's programs: `socat`, `ip`, `ss`, `unshare`, `pgrep` and `flock` (`iproute2`/`iproute`, `socat`,
+  util-linux and procps-ng). `bsdtar` is needed only for `.7z` or `.rar` mods.
+- A Proton version installed in Steam, or `PROTON` set to a `proton` script; the wrapper picks one otherwise.
+- On Ubuntu 24.04 and other systems where `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is 1, run the
+  installation's `app/linux/allow-namespace.sh` once as root.
+- The Bingus Shared Loader v20 manager ZIP (`HD2H_LOADER_ZIP`), unless the installation already has an enabled loader.
+
+The installation defaults to
+`~/.local/share/hellforge-prefix/pfx/drive_c/users/steamuser/Documents/HellForge`. `HD2H_HELLFORGE_ROOT` (or
+`--hellforge-root`) takes the **host** path of another installation; `HD2H_HELLFORGE_PROFILE` (or `--profile`) chooses
+the profile. Run:
+
+```bash
+export HD2H_TARGET=hellforge
+python3 harness.py preflight
+python3 harness.py start
+python3 harness.py stop
+```
+
+The harness starts the installation's wrapper with `INSTALL`, `STEAM_COMPAT_DATA_PATH` and `TEMP`/`TMP` set and in its
+own process group. `stop` and `finish` first write `stop-observation.signal` into the run folder (the runner's own stop
+request), wait for the wrapper, and only then send SIGTERM and, if needed, SIGKILL to the wrapper's whole process group,
+so `hf-inner.sh`, Proton, the backend and the game do not survive. The run folder is `logs/sessions/<runId>`; the
+pointer in `logs/play-session.json` is converted from the installation's own Wine prefix (`C:\...`) or `Z:\...` to a
+host path, and `result.json` supplies `status` and `gameExitCode`.
+
+Works: `preflight`, `start`, `stop`, `finish`, `recover`, `watch`, `lua`, the mailbox, mod packs and the file-based
+commands. Not available or not verified:
+
+- **Screenshots** need X11 and ImageMagick (`import` or `magick import`). A window covered by another window may capture
+  as garbage without a compositor's help; Wayland has no portable cross-client window capture. `shot`,
+  `mission --shots` and the capture checks fail with a clear `CaptureError` instead of returning a blank image.
+- **Window close** (`close`, and the WM_CLOSE fallback in `stop`) needs X11 and `_NET_WM_PID`. On Wayland no window is
+  found, so the harness falls back to signals.
+- **Live memory reads** (`state`'s live part, `ship`, `mission`, `leave`, `map`, and `pair`) depend on
+  `/proc/<pid>/mem` and `/proc/<pid>/maps`; see below. `lua` and the mailbox still work when they do not.
+- `pair.py` and `livemods.py pair-sync` have not been run on Linux; treat them as later work.
+
+### Memory reads and Yama `ptrace_scope`
+
+Linux memory reads open `/proc/<game>/mem` and read `/proc/<game>/maps`; both use ptrace checks. The expected outcomes
+from the D.1 review, to be measured on a real session:
+
+- `ptrace_scope=0`: expected to work for the same user if the game process is dumpable.
+- `ptrace_scope=1`: only an ancestor may attach. The harness starts the wrapper, so it should be an ancestor through
+  `bash -> unshare -> Proton -> wine`, but a Proton or Wine helper that daemonises or is reparented breaks that. Not
+  verified.
+- `ptrace_scope=2`: a normal user cannot attach at all, even as an ancestor; only `CAP_SYS_PTRACE` works.
+- `hidepid=` on `/proc` hides the game from the harness entirely.
+
+Read `/proc/sys/kernel/yama/ptrace_scope` before a run. When a read is denied, the harness's error names the value it
+read; the first real Linux session must record the policy, whether the harness is an ancestor, and which `/proc` files
+are readable.
 
 ## Galactic Map planet view (`map`)
 

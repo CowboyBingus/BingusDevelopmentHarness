@@ -22,12 +22,14 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
+import sys
 import time
 import zipfile
 
 from . import archive, winapi
-from .paths import GAME_EXE, HARNESS
+from .paths import GAME_EXE, HARNESS, STEAM_APP_ID
 
 RUNNER_EXE = 'HellForge.Session.exe'
 AGENT_FOLDER = 'zz-harness-agent'
@@ -39,6 +41,10 @@ MODS_SETTINGS = 'hellforge-mods.json'
 LOADER_ZIP = Path(os.environ.get('HD2H_LOADER_ZIP') or HARNESS.parent / 'releases' / 'Bingus-Shared-Loader-v20.zip')
 STOP_SIGNAL = 'stop-observation.signal'
 CREATE_NO_WINDOW = 0x08000000
+IS_WINDOWS = sys.platform == 'win32'
+# Popen objects of wrappers this process started, kept so their exit is reaped and a discarded object cannot warn
+# "subprocess is still running" while the wrapper runs.
+_LINUX_WRAPPERS = {}
 
 
 class HellForgeError(RuntimeError):
@@ -56,25 +62,132 @@ def _json(path):
         return None
 
 
+def _default_prefix():
+    """The Steam compat-data folder a session uses when the installation is outside a prefix."""
+    return Path(os.environ.get('STEAM_COMPAT_DATA_PATH') or
+                Path.home() / '.local' / 'share' / 'Steam' / 'steamapps' / 'compatdata' / str(STEAM_APP_ID))
+
+
+def wine_prefix(root):
+    """The Steam compat-data folder whose pfx holds root, else STEAM_COMPAT_DATA_PATH or Steam's default prefix."""
+    root = Path(root).resolve()
+    parts = root.parts
+    for index in range(len(parts) - 1):
+        if parts[index] == 'pfx' and parts[index + 1] == 'drive_c':
+            return Path(*parts[:index])
+    return _default_prefix()
+
+
+def to_wine_path(host, prefix=None):
+    """A Windows path for a host path: C:\\... inside the prefix's drive_c, else Z:\\...."""
+    host = Path(host)
+    prefix = Path(prefix) if prefix is not None else wine_prefix(host)
+    drive_c = (prefix / 'pfx' / 'drive_c').resolve()
+    try:
+        relative = host.resolve().relative_to(drive_c)
+    except ValueError:
+        return 'Z:' + str(host.resolve()).replace('/', '\\')
+    return 'C:\\' if relative == Path('.') else 'C:\\' + str(relative).replace('/', '\\')
+
+
+def to_host_path(value, prefix=None):
+    """The host path of a Wine path (C:\\... through the prefix, Z:\\... as /...); other values are returned as they
+    are.
+
+    A C:\\ path belongs to the prefix that wrote it. Callers passing an installation's files use
+    installation_host_path, which always uses that installation's own prefix; the Steam default is only a fallback for
+    a path with no installation.
+    """
+    text = str(value)
+    if not (len(text) >= 3 and text[0].upper() in ('C', 'Z') and text[1] == ':' and text[2] in ('\\', '/')):
+        return text
+    drive, rest = text[0].upper(), text[3:].replace('\\', '/')
+    if drive == 'C':
+        prefix = Path(prefix) if prefix is not None else _default_prefix()
+        target = Path(prefix) / 'pfx' / 'drive_c' / rest
+    else:
+        target = Path('/') / rest
+    return os.path.realpath(str(target))
+
+
+def installation_host_path(paths, value):
+    """The host path of a path a HellForge installation wrote: C:\\ through the installation's own prefix, Z:\\ as
+    /...."""
+    return to_host_path(value, wine_prefix(paths.hellforge))
+
+
+def linux_wrapper(paths):
+    """The Linux session wrapper of an installation."""
+    return Path(paths.hellforge) / 'app' / 'linux' / 'hellforge-linux.sh'
+
+
+def linux_environment(paths, extra=None):
+    """The environment the Linux wrapper and its Proton session need."""
+    environment = dict(os.environ)
+    temp = Path(paths.hellforge) / 'temp'
+    temp.mkdir(exist_ok=True)
+    environment['TEMP'] = environment['TMP'] = str(temp)
+    environment['INSTALL'] = str(paths.hellforge)
+    environment['STEAM_COMPAT_DATA_PATH'] = str(wine_prefix(paths.hellforge))
+    environment.pop('PSModulePath', None)
+    if extra:
+        environment.update(extra)
+    return environment
+
+
+def linux_command(arguments, paths):
+    """The wrapper command the launcher uses: bash <root>/app/linux/hellforge-linux.sh <session runner> ..."""
+    return ['bash', str(linux_wrapper(paths))] + list(arguments)
+
+
 def runners():
     """PIDs of running session runners (any installation)."""
     return winapi.processes(RUNNER_EXE)
 
 
-def copy_games(paths):
-    """PIDs of running games started from this installation's copy (not the Steam install)."""
+def _copy_games_windows(paths):
     root = os.path.normcase(str(Path(paths.game).resolve())) + os.sep
     return [pid for pid in winapi.processes(GAME_EXE)
             if os.path.normcase(winapi.image_path(pid) or '').startswith(root)]
+
+
+def _under(path, root):
+    if not path:
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def _copy_games_linux(paths):
+    root = Path(paths.game).resolve()
+    return [pid for pid in winapi.processes(GAME_EXE)
+            if _under(winapi.image_path(pid, root=paths.hellforge), root)]
+
+
+copy_games = _copy_games_windows if IS_WINDOWS else _copy_games_linux
 
 
 def facts(paths):
     """The installation's facts; raises HellForgeError when a session cannot start."""
     if paths.hellforge is None or not Path(paths.hellforge).is_dir():
         raise HellForgeError('no HellForge installation at %s' % paths.hellforge)
-    install = _json(paths.hellforge / 'hellforge-install.json')
-    if install is None:
-        raise HellForgeError('%s is not a HellForge installation (no hellforge-install.json)' % paths.hellforge)
+    marker = Path(paths.hellforge) / 'hellforge-install.json'
+    if IS_WINDOWS:
+        install = _json(marker)
+        if install is None:
+            raise HellForgeError('%s is not a HellForge installation (no hellforge-install.json)' % paths.hellforge)
+    else:
+        # The Linux wrapper is the supported start route; name every file that is missing, not just the first.
+        missing = [str(required) for required in (marker, linux_wrapper(paths)) if not Path(required).exists()]
+        if missing:
+            raise HellForgeError('%s is not a HellForge installation: missing %s'
+                                 % (paths.hellforge, ', '.join(missing)))
+        install = _json(marker)
+        if install is None:
+            raise HellForgeError('%s is not a HellForge installation (%s is not a valid install marker)'
+                                 % (paths.hellforge, marker))
     for required in (paths.session_runner, paths.hellforge_profile):
         if not Path(required).exists():
             raise HellForgeError('missing %s' % required)
@@ -239,13 +352,23 @@ def session_arguments(paths, multiplayer=None, war=None):
         arguments.append('--open-war')
     if launcher.get('engineLog'):
         arguments.append('--engine-log')
+    if not IS_WINDOWS:
+        # The runner is a Windows program under Proton: the launcher hands it Wine paths (SessionRunner.cs).
+        prefix = wine_prefix(paths.hellforge)
+        for flag in ('--install', '--profile', '--live-war'):
+            if flag in arguments:
+                index = arguments.index(flag)
+                arguments[index + 1] = to_wine_path(arguments[index + 1], prefix)
     return arguments
 
 
 def current_run(paths):
     """(run id, run folder) of the installation's latest session, from logs/play-session.json."""
     pointer = _json(paths.play_session) or {}
-    return pointer.get('runId'), (Path(pointer['run']) if pointer.get('run') else None)
+    run = pointer.get('run')
+    if run and not IS_WINDOWS:
+        run = installation_host_path(paths, run)
+    return pointer.get('runId'), (Path(run) if run else None)
 
 
 def result(run):
@@ -253,15 +376,38 @@ def result(run):
     return (_json(Path(run) / 'result.json') or {}) if run else {}
 
 
-def _runner_log_tail(paths, lines=5):
-    log = paths.hellforge / 'logs' / 'session-runner.log'
+def _tail(path, lines=5):
     try:
-        return ' | '.join(log.read_text(encoding='utf-8', errors='replace').splitlines()[-lines:])
+        return ' | '.join(Path(path).read_text(encoding='utf-8', errors='replace').splitlines()[-lines:])
     except OSError:
         return ''
 
 
-def _spawn(arguments, paths, run_dir):
+def _runner_log_tail(paths, lines=5):
+    return _tail(Path(paths.hellforge) / 'logs' / 'session-runner.log', lines)
+
+
+def _wrapper_log_tail(paths, lines=5):
+    """The Linux wrapper's own log; a failure before the run folder opens is often only here."""
+    return _tail(Path(paths.hellforge) / 'logs' / 'linux-session-wrapper.log', lines)
+
+
+def _launch_failure(paths, run):
+    """The runner's result or the logs that explain a launch that stopped before the game started."""
+    failure = result(run).get('failure') if run else None
+    if failure:
+        return failure
+    if IS_WINDOWS:
+        return _runner_log_tail(paths) or 'no reason given'
+    tails = []
+    for name, tail in (('session-runner.log', _runner_log_tail(paths)),
+                       ('linux-session-wrapper.log', _wrapper_log_tail(paths))):
+        if tail:
+            tails.append('%s: %s' % (name, tail))
+    return ' | '.join(tails) or 'no reason given'
+
+
+def _spawn_windows(arguments, paths, run_dir):
     """Starts the runner without a window, as the launcher does (SessionRunner: CreateNoWindow). The runner reports
     through its run folder and logs/session-runner.log, so nothing of its output is kept here."""
     environment = dict(os.environ)
@@ -278,6 +424,43 @@ def _spawn(arguments, paths, run_dir):
         raise HellForgeError('could not start %s: %s' % (arguments[0], error))
 
 
+def _spawn_linux(arguments, paths, run_dir):
+    """Starts the installation's Linux wrapper in its own process group, as the launcher does. The wrapper runs the
+    session runner under Proton and keeps the run's whole tree together, so a timeout can end it as one group."""
+    wrapper = linux_wrapper(paths)
+    if not wrapper.is_file():
+        raise HellForgeError('the Linux session wrapper is missing: %s' % wrapper)
+    try:
+        environment = linux_environment(paths)
+        process = subprocess.Popen(linux_command(arguments, paths), cwd=str(paths.hellforge), env=environment,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        _LINUX_WRAPPERS[process.pid] = process
+        return process.pid
+    except OSError as error:
+        raise HellForgeError('could not start %s: %s' % (wrapper, error))
+
+
+_spawn = _spawn_windows if IS_WINDOWS else _spawn_linux
+
+
+def _pid_alive_windows(pid):
+    return pid in runners()
+
+
+def _pid_alive_linux(pid):
+    if not pid:
+        return False
+    try:
+        with winapi.Process(pid) as process:
+            return not process.wait(0)
+    except winapi.WinError:
+        return False
+
+
+_pid_alive = _pid_alive_windows if IS_WINDOWS else _pid_alive_linux
+
+
 def windows_powershell_modules():
     """Windows PowerShell 5.1's module path, as a fresh session inherits it: the user's modules, then the machine's."""
     import winreg
@@ -286,7 +469,7 @@ def windows_powershell_modules():
     return os.path.expandvars(r'%USERPROFILE%\Documents\WindowsPowerShell\Modules;') + machine
 
 
-def steam_pid_mismatch():
+def _steam_pid_mismatch_windows():
     """(the Steam pid this process reads, the running steam.exe pids) when the first is not among the second, else
     None. The game asks SteamAPI_IsSteamRunning() once at start-up, which reads
     HKCU\\Software\\Valve\\Steam\\ActiveProcess\\pid and checks that process; a stale value makes it stop at
@@ -301,6 +484,15 @@ def steam_pid_mismatch():
     except OSError:
         pid = None
     return None if pid in running else (pid, running)
+
+
+def _steam_pid_mismatch_linux():
+    """Linux has no Windows registry and native Steam has no steam.exe ActiveProcess pid; the wrapper and the
+    session runner check the Steam bridge themselves."""
+    return None
+
+
+steam_pid_mismatch = _steam_pid_mismatch_windows if IS_WINDOWS else _steam_pid_mismatch_linux
 
 
 def launch(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **facts: None):
@@ -329,12 +521,14 @@ def launch(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, 
         games = copy_games(paths)
         if fresh and games:
             return runner, games[0], run_id, run
-        if runner not in runners():
-            failure = result(run).get('failure') if fresh else None
-            raise HellForgeError('the session runner exited before the game started: %s'
-                                 % (failure or _runner_log_tail(paths) or 'no reason given'))
+        if not _pid_alive(runner):
+            failure = _launch_failure(paths, run if fresh else None)
+            raise HellForgeError('the session runner exited before the game started: %s' % failure)
         time.sleep(1)
-    raise HellForgeError('the game did not start within %d s (session runner pid %d)' % (timeout, runner))
+    if IS_WINDOWS:
+        raise HellForgeError('the game did not start within %d s (session runner pid %d)' % (timeout, runner))
+    raise HellForgeError('the game did not start within %d s (session runner pid %d): %s'
+                         % (timeout, runner, _launch_failure(paths, None)))
 
 
 def signal_stop(run):
@@ -343,7 +537,7 @@ def signal_stop(run):
         Path(run, STOP_SIGNAL).write_text('stop', encoding='utf-8')
 
 
-def wait_runner(pid, timeout):
+def _wait_runner_windows(pid, timeout):
     """True once the runner has exited (or cannot be opened, which means it is gone)."""
     if not pid or pid not in runners():
         return True
@@ -354,9 +548,44 @@ def wait_runner(pid, timeout):
         return pid not in runners()
 
 
-def abort_runner(manifest, note=print, wait=60):
-    """Ends a runner whose start failed part-way: the stop signal when its run folder exists, else (before it
-    started the game) a kill. Returns True once it is gone."""
+def _wait_runner_linux(pid, timeout):
+    """True once the wrapper (the Linux runner pid) has exited, or cannot be opened, which means it is gone."""
+    if not pid:
+        return True
+    process = _LINUX_WRAPPERS.get(pid)
+    if process is not None and hasattr(process, 'wait'):
+        try:
+            process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            return False
+        except OSError:
+            pass
+        _LINUX_WRAPPERS.pop(pid, None)
+        return True
+    try:
+        with winapi.Process(pid) as process:
+            return process.wait(timeout)
+    except winapi.WinError:
+        return True
+
+
+wait_runner = _wait_runner_windows if IS_WINDOWS else _wait_runner_linux
+
+
+def _signal_runner_group(pid, sig):
+    """Sends a signal to the process group the Linux wrapper leads, or to the process alone when it leads none.
+    Returns whether the signal was sent."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+        else:
+            os.kill(pid, sig)
+        return True
+    except OSError:
+        return False
+
+
+def _abort_runner_windows(manifest, note, wait):
     pid = manifest.get('runner_pid')
     if wait_runner(pid, 0):
         return True
@@ -369,15 +598,62 @@ def abort_runner(manifest, note=print, wait=60):
     return wait_runner(pid, 30)
 
 
-def end_runner(manifest, note=print, wait=120, after_signal=60):
-    """Lets the runner finish once the game is gone (it stops the backend and restores the copy); asks it to stop
-    when it does not. Returns how it ended: 'exited', 'signalled' or 'still-running'."""
+def _abort_runner_linux(manifest, note, wait):
+    """The stop signal first when the run folder exists, then the wrapper's whole group (hf-inner, Proton, the game
+    and the backend), never just the wrapper."""
+    pid = manifest.get('runner_pid')
+    if wait_runner(pid, 0):
+        return True
+    if manifest.get('hellforge_run'):
+        signal_stop(manifest['hellforge_run'])
+        if wait_runner(pid, wait):
+            return True
+    note('ending the session runner pid %d and its process group' % pid)
+    if _signal_runner_group(pid, signal.SIGTERM) and wait_runner(pid, 30):
+        return True
+    _signal_runner_group(pid, signal.SIGKILL)
+    return wait_runner(pid, 30)
+
+
+def abort_runner(manifest, note=print, wait=60):
+    """Ends a runner whose start failed part-way: the stop signal when its run folder exists, else (before it
+    started the game) a kill. On Linux the kill reaches the wrapper's process group. Returns True once it is gone."""
+    if IS_WINDOWS:
+        return _abort_runner_windows(manifest, note, wait)
+    return _abort_runner_linux(manifest, note, wait)
+
+
+def _end_runner_windows(manifest, note, wait, after_signal):
     pid = manifest.get('runner_pid')
     if wait_runner(pid, wait):
         return 'exited'
     note('the session runner is still running; asking it to stop')
     signal_stop(manifest.get('hellforge_run'))
     return 'signalled' if wait_runner(pid, after_signal) else 'still-running'
+
+
+def _end_runner_linux(manifest, note, wait, after_signal):
+    pid = manifest.get('runner_pid')
+    if wait_runner(pid, wait):
+        return 'exited'
+    note('the session runner is still running; asking it to stop')
+    signal_stop(manifest.get('hellforge_run'))
+    if wait_runner(pid, after_signal):
+        return 'signalled'
+    note('the Linux session wrapper pid %d did not stop; ending its process group' % pid)
+    if _signal_runner_group(pid, signal.SIGTERM) and wait_runner(pid, 30):
+        return 'killed'
+    _signal_runner_group(pid, signal.SIGKILL)
+    return 'exited' if wait_runner(pid, 30) else 'still-running'
+
+
+def end_runner(manifest, note=print, wait=120, after_signal=60):
+    """Lets the runner finish once the game is gone (it stops the backend and restores the copy); asks it to stop
+    when it does not. On Linux, only after the stop signal has timed out is the wrapper's process group signalled
+    (SIGTERM, then SIGKILL). Returns how it ended: 'exited', 'signalled', 'killed' or 'still-running'."""
+    if IS_WINDOWS:
+        return _end_runner_windows(manifest, note, wait, after_signal)
+    return _end_runner_linux(manifest, note, wait, after_signal)
 
 
 def collect(run, target):

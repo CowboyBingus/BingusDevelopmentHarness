@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 import uuid
 
@@ -31,7 +32,8 @@ from .paths import HARNESS, Paths
 RECORD = HARNESS / 'state' / 'pair.json'
 IDENTITIES = (76561199000000002, 76561199000000003)   # host, joiner
 LINK_PORTS = (47002, 47003)
-DEFAULT_DIRECTORY = Path(r'C:\HellForge-mi-directory')
+DEFAULT_DIRECTORY = (Path(r'C:\HellForge-mi-directory') if sys.platform == 'win32' else
+                     Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / 'hellforge-mi-directory')
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -134,23 +136,38 @@ def start(paths, role, directory, game_options, note, timeout=420, strangers=Fal
     """Starts one installation's sandboxed session with the several-instances switches; returns (game pid, run).
     strangers: HELLFORGE_TEST_STRANGERS=1, the two are not friends (no presence; the lobby directory's stranger path)."""
     me, other = (0, 1) if role == 'host' else (1, 0)
-    arguments = hellforge.session_arguments(paths, multiplayer=True) + ['--sandbox', '--game-options', game_options]
-    environment = dict(os.environ)
-    environment.update({
+    arguments = hellforge.session_arguments(paths, multiplayer=True)
+    if sys.platform == 'win32':
+        arguments.append('--sandbox')
+    arguments += ['--game-options', game_options]
+    switches = {
         'HELLFORGE_MULTI_INSTANCE': '1',
         'HELLFORGE_IDENTITY': str(IDENTITIES[me]),
         'HELLFORGE_PEER_LINK': 'udp:%s:%d:%s=%d' % (_hex(IDENTITIES[me]), LINK_PORTS[me], _hex(IDENTITIES[other]), LINK_PORTS[other]),
-        'HELLFORGE_DIRECTORY_FOLDER': str(directory),
+        'HELLFORGE_DIRECTORY_FOLDER': str(directory) if sys.platform == 'win32' else hellforge.to_wine_path(directory),
         'HELLFORGE_TEST_STRANGERS': '1' if strangers else '0',
+    }
+    if sys.platform == 'win32':
+        environment = dict(os.environ)
+        environment.update(switches)
         # the runner's own checks run Windows PowerShell 5.1; an inherited PowerShell 7 module path breaks them
-        'PSModulePath': os.path.expandvars(r'%USERPROFILE%\Documents\WindowsPowerShell\Modules;') + _machine_module_path(),
-    })
-    temp = Path(paths.hellforge) / 'temp'
-    temp.mkdir(exist_ok=True)
-    environment['TEMP'] = environment['TMP'] = str(temp)
+        environment['PSModulePath'] = (os.path.expandvars(r'%USERPROFILE%\Documents\WindowsPowerShell\Modules;') +
+                                       _machine_module_path())
+        temp = Path(paths.hellforge) / 'temp'
+        temp.mkdir(exist_ok=True)
+        environment['TEMP'] = environment['TMP'] = str(temp)
+        command = arguments
+    else:
+        environment = hellforge.linux_environment(paths, switches)
+        command = hellforge.linux_command(arguments, paths)
     before, _ = hellforge.current_run(paths)
-    runner = subprocess.Popen(arguments, cwd=str(paths.hellforge), env=environment, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW).pid
+    if sys.platform == 'win32':
+        runner = subprocess.Popen(command, cwd=str(paths.hellforge), env=environment, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  creationflags=CREATE_NO_WINDOW).pid
+    else:
+        runner = subprocess.Popen(command, cwd=str(paths.hellforge), env=environment, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True).pid
     _instance(_record(), role, runner=runner)
     note('%s: session runner started (pid %d, options %s)' % (role, runner, game_options))
     deadline = time.monotonic() + timeout
@@ -165,7 +182,7 @@ def start(paths, role, directory, game_options, note, timeout=420, strangers=Fal
             return games[0], Path(run)
         if result.get('status') == 'failed':
             raise PairError('%s: the session failed: %s' % (role, result.get('failure')))
-        if runner not in hellforge.runners():
+        if hellforge.wait_runner(runner, 0):
             raise PairError('%s: the session runner exited before the game started' % role)
         time.sleep(2)
     raise PairError('%s: the game did not start within %d s' % (role, timeout))
@@ -504,13 +521,14 @@ def stop(note=print, wait=120):
         data = record.get(role)
         if not data:
             continue
-        if data.get('run') and data.get('runner') in hellforge.runners():
+        runner = data.get('runner')
+        if data.get('run') and not hellforge.wait_runner(runner, 0):
             hellforge.signal_stop(data['run'])
             deadline = time.monotonic() + wait
-            while time.monotonic() < deadline and data['runner'] in hellforge.runners():
+            while time.monotonic() < deadline and not hellforge.wait_runner(runner, 0):
                 time.sleep(2)
-            if data['runner'] in hellforge.runners():
-                problems.append('%s: the session runner %d did not end' % (role, data['runner']))
+            if not hellforge.wait_runner(runner, 0):
+                problems.append('%s: the session runner %d did not end' % (role, runner))
                 continue
             note('%s: session ended (%s)' % (role, hellforge.result(data['run']).get('status')))
         paths = Paths.for_hellforge(data['root'], HARNESS)
