@@ -3,6 +3,7 @@ from contextlib import ExitStack
 import argparse
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -22,15 +23,22 @@ LOADER_MANIFEST = b'{"Name": "Bingus Shared Loader", "Builds": ["25480438"]}'
 LOADER_PATCH = archive.make_archive({archive.LOADER_CALLBACKS: b'\x01\0\0\0\x02\0\0\0x'})
 
 
-def fake_hellforge(tmp, own_loader=False, mods_settings=True):
+def fake_hellforge(tmp, own_loader=False, mods_settings=True, inside_prefix=False, wrapper=None):
     """A HellForge installation as Setup leaves it, with two profile files (the game's own and an imported one)."""
-    root = Path(tmp) / 'HellForge'
+    if inside_prefix:
+        root = (Path(tmp) / 'hellforge-prefix' / 'pfx' / 'drive_c' / 'users' / 'steamuser' / 'Documents' /
+                'HellForge')
+    else:
+        root = Path(tmp) / 'HellForge'
     (root / 'game' / 'bin').mkdir(parents=True)
     (root / 'game' / 'bin' / 'helldivers2.exe').write_bytes(b'exe')
     (root / 'game' / 'data' / 'game').mkdir(parents=True)
     (root / 'game' / 'data' / 'game' / 'game.dll').write_bytes(b'dll')
     (root / 'app' / 'session').mkdir(parents=True)
     (root / 'app' / 'session' / 'HellForge.Session.exe').write_bytes(b'runner')
+    (root / 'app' / 'linux').mkdir(parents=True)
+    (root / 'app' / 'linux' / 'hellforge-linux.sh').write_bytes(
+        Path(wrapper).read_bytes() if wrapper else b'#!/bin/sh\nexit 0\n')
     (root / 'hellforge-install.json').write_text('{"schemaVersion": 1, "buildId": "25480438"}')
     (root / 'launcher-settings.json').write_text(json.dumps(
         {'selectedProfile': 'alpha', 'localPlayFab': True, 'sdkShims': True, 'war': 'live', 'engineLog': True}))
@@ -113,6 +121,7 @@ class Paths_(unittest.TestCase):
                 self.assertEqual(Paths.from_environment().hellforge, paths.hellforge)
             self.assertEqual(Paths.from_environment('steam').target, 'steam')
 
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows hands the runner host paths')
     def test_session_arguments_follow_the_launcher(self):
         with tempfile.TemporaryDirectory() as tmp:
             paths = fake_hellforge(tmp)
@@ -127,6 +136,18 @@ class Paths_(unittest.TestCase):
             self.assertNotIn('--local-playfab', solo)
             self.assertIn('--open-war', solo)
             self.assertNotIn('--live-war', hellforge.session_arguments(paths, war='frozen'))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Linux hands the runner Wine paths')
+    def test_session_arguments_use_wine_paths_on_linux(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_hellforge(tmp)
+            arguments = hellforge.session_arguments(paths)
+            self.assertEqual(arguments[:2], [str(paths.session_runner), 'play'])
+            self.assertEqual(arguments[3], hellforge.to_wine_path(paths.hellforge))
+            self.assertEqual(arguments[5], hellforge.to_wine_path(paths.hellforge_profile))
+            self.assertEqual(arguments[arguments.index('--live-war') + 1],
+                             hellforge.to_wine_path(paths.hellforge / 'live-war.json'))
+            self.assertTrue(arguments[3].startswith('Z:'), 'the temporary install is outside a Proton prefix')
 
 
 class Packs(unittest.TestCase):
@@ -306,6 +327,7 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('STEAM NOT DETECTED', str(raised.exception))
 
 
+@unittest.skipUnless(sys.platform == 'win32', 'the Steam ActiveProcess check reads the Windows registry')
 class SteamPid(unittest.TestCase):
     def check(self, registry_pid, running):
         class Key:

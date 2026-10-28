@@ -25,6 +25,7 @@ class Processes(unittest.TestCase):
             self.assertEqual(process.exit_code(), 7)
         child.wait()
 
+    @unittest.skipUnless(sys.platform == 'win32', 'TerminateProcess can choose the exit code on Windows only')
     def test_terminate(self):
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
         with winapi.Process(child.pid) as process:
@@ -52,6 +53,7 @@ class Memory(unittest.TestCase):
             self.assertEqual(reader.pointer(address + 4), 0x123456789ABC)
             self.assertIsNone(reader.read(0x10, 4))
 
+    @unittest.skipUnless(sys.platform == 'win32', 'kernel32 image enumeration is Windows-only')
     def test_finds_an_image_by_pe_timestamp_without_module_enumeration(self):
         kernel32 = ctypes.WinDLL('kernel32')._handle
         header = ctypes.string_at(kernel32, 0x400)
@@ -64,6 +66,7 @@ class Memory(unittest.TestCase):
             self.assertEqual(reader.image_base(stamp), kernel32)
             self.assertIsNone(reader.image_base(0x0BADF00D))
 
+    @unittest.skipUnless(sys.platform == 'win32', 'SetThreadExecutionState is Windows-only')
     def test_keep_awake_toggles(self):
         self.assertTrue(winapi.keep_awake(True))
         self.assertTrue(winapi.keep_awake(False))
