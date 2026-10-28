@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 
@@ -14,6 +15,8 @@ from . import builds, deploy, dumps, hellforge, settings, winapi
 from .mailbox import Mailbox, MailboxError
 from .paths import GAME_EXE, STEAM_APP_ID
 from .state import State
+
+IS_WINDOWS = sys.platform == 'win32'
 
 
 class HarnessError(RuntimeError):
@@ -124,16 +127,18 @@ def live_reads(pid, build):
 
 
 def _end(pid, process, note, close_timeout, kill_timeout, graceful=True):
-    """WM_CLOSE (if graceful), then TerminateProcess, then taskkill. Returns how the process ended."""
+    """WM_CLOSE (if graceful), then terminate (TerminateProcess on Windows, SIGKILL on Linux), then taskkill on
+    Windows. Returns how the process ended."""
     if graceful and winapi.post_close(pid):
         note('asked pid %d to close (WM_CLOSE)' % pid)
         if process.wait(close_timeout):
             return 'close'
     note('terminating pid %d' % pid)
-    if not winapi.terminate(pid, 1):
+    if not winapi.terminate(pid, 1) and IS_WINDOWS:
         subprocess.run(['taskkill', '/PID', str(pid), '/F'], capture_output=True)
     if not process.wait(kill_timeout):
-        raise HarnessError('pid %d did not exit after TerminateProcess and taskkill' % pid)
+        raise HarnessError(('pid %d did not exit after TerminateProcess and taskkill' if IS_WINDOWS else
+                            'pid %d did not exit after terminate') % pid)
     return 'kill'
 
 
@@ -186,6 +191,8 @@ def close_running(note=print, close_timeout=60, kill_timeout=30):
 
 def launch(timeout=180):
     """Starts the game through Steam and returns its PID (asks Steam a second time halfway)."""
+    if not IS_WINDOWS:
+        raise HarnessError('the steam target runs on Windows only; use --target hellforge')
     os.startfile('steam://rungameid/%d' % STEAM_APP_ID)
     started, asked_again = time.monotonic(), False
     while time.monotonic() - started < timeout:

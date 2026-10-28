@@ -9,13 +9,27 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import sys
 
 STEAM_APP_ID = 553850
 GAME_EXE = 'helldivers2.exe'
-DEFAULT_GAME = Path(r'C:\Program Files (x86)\Steam\steamapps\common\Helldivers 2')
-DEFAULT_HELLFORGE = Path(r'C:\HellForge')
 HARNESS = Path(__file__).resolve().parents[1]
 TARGETS = ('steam', 'hellforge')
+if sys.platform == 'win32':
+    DEFAULT_GAME = Path(r'C:\Program Files (x86)\Steam\steamapps\common\Helldivers 2')
+    DEFAULT_HELLFORGE = Path(r'C:\HellForge')
+else:
+    DEFAULT_GAME = Path.home() / '.local' / 'share' / 'Steam' / 'steamapps' / 'common' / 'Helldivers 2'
+    DEFAULT_HELLFORGE = (Path.home() / '.local' / 'share' / 'hellforge-prefix' / 'pfx' / 'drive_c' / 'users' /
+                         'steamuser' / 'Documents' / 'HellForge')
+
+
+def _steam_environment():
+    """APPDATA and LOCALAPPDATA for the native Steam copy: the Proton prefix's user folders on Linux."""
+    prefix = Path(os.environ.get('STEAM_COMPAT_DATA_PATH') or
+                  Path.home() / '.local' / 'share' / 'Steam' / 'steamapps' / 'compatdata' / str(STEAM_APP_ID))
+    user = prefix / 'pfx' / 'drive_c' / 'users' / 'steamuser' / 'AppData'
+    return user / 'Roaming', user / 'Local'
 
 
 @dataclass(frozen=True)
@@ -36,8 +50,11 @@ class Paths:
         if target not in TARGETS:
             raise ValueError('target must be one of %s' % ', '.join(TARGETS))
         if target == 'steam':
-            return cls(Path(os.environ.get('HD2_GAME_ROOT', DEFAULT_GAME)), Path(os.environ['APPDATA']),
-                       Path(os.environ['LOCALAPPDATA']), harness)
+            if sys.platform == 'win32':
+                return cls(Path(os.environ.get('HD2_GAME_ROOT', DEFAULT_GAME)), Path(os.environ['APPDATA']),
+                           Path(os.environ['LOCALAPPDATA']), harness)
+            appdata, localappdata = _steam_environment()
+            return cls(Path(os.environ.get('HD2_GAME_ROOT', DEFAULT_GAME)), appdata, localappdata, harness)
         return cls.for_hellforge(Path(hellforge_root or os.environ.get('HD2H_HELLFORGE_ROOT') or DEFAULT_HELLFORGE),
                                  harness, profile or os.environ.get('HD2H_HELLFORGE_PROFILE'))
 
