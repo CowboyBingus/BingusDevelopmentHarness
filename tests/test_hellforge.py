@@ -79,24 +79,33 @@ class FakeRunner:
 
     def __init__(self, paths, game):
         self.paths, self.game, self.alive, self.run, self.calls = paths, game, False, None, []
+        self.sandboxed, self.sandbox_mode, self.sandbox_notice = None, None, None
 
     def runners(self):
         return [RUNNER] if self.alive else []
 
-    def launch(self, paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **k: None):
-        self.calls.append({'multiplayer': multiplayer, 'war': war, 'timeout': timeout})
+    def launch(self, paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **k: None,
+               sandbox=None):
+        self.calls.append({'multiplayer': multiplayer, 'war': war, 'timeout': timeout, 'sandbox': sandbox})
         self.alive = True
         record(runner_pid=RUNNER)
         self.run = paths.hellforge / 'logs' / 'sessions' / 'run1'
         (self.run / 'backend').mkdir(parents=True)
-        (self.run / 'result.json').write_text('{"status": "observing"}')
+        self.result({'status': 'observing'})
         (self.run / 'backend' / 'requests.jsonl').write_text('{"path": "/lobby"}\n')
         record(hellforge_run=str(self.run), hellforge_run_id='run1')
         return RUNNER, self.game.launch(), 'run1', self.run
 
+    def result(self, outcome):
+        for key, value in (('sandboxed', self.sandboxed), ('sandboxMode', self.sandbox_mode),
+                           ('sandboxNotice', self.sandbox_notice)):
+            if value is not None:
+                outcome[key] = value
+        (self.run / 'result.json').write_text(json.dumps(outcome))
+
     def finish(self, status='observed'):
         """The game is gone: the runner writes its result and exits."""
-        (self.run / 'result.json').write_text(json.dumps({'status': status}))
+        self.result({'status': status})
         self.alive = False
 
 
@@ -148,6 +157,39 @@ class Paths_(unittest.TestCase):
             self.assertEqual(arguments[arguments.index('--live-war') + 1],
                              hellforge.to_wine_path(paths.hellforge / 'live-war.json'))
             self.assertTrue(arguments[3].startswith('Z:'), 'the temporary install is outside a Proton prefix')
+
+    def test_sandbox_arguments_follow_the_setting_or_force_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_hellforge(tmp)
+            settings_file = paths.hellforge / 'launcher-settings.json'
+            launcher = json.loads(settings_file.read_text())
+            for value, wanted in ((None, True), (True, True), (False, False)):
+                configured = dict(launcher)
+                configured.pop('sandboxed', None)
+                if value is not None:
+                    configured['sandboxed'] = value
+                settings_file.write_text(json.dumps(configured))
+                arguments = hellforge.session_arguments(paths)
+                self.assertEqual('--sandbox' in arguments, wanted, 'sandboxed=%r' % value)
+                self.assertLessEqual(arguments.count('--sandbox'), 1)
+            settings_file.write_text(json.dumps(dict(launcher, sandboxed=False)))
+            self.assertIn('--sandbox', hellforge.session_arguments(paths, sandbox='on'))
+            self.assertIn('--sandbox', hellforge.session_arguments(paths, sandbox=True))
+            settings_file.write_text(json.dumps(dict(launcher, sandboxed=True)))
+            self.assertNotIn('--sandbox', hellforge.session_arguments(paths, sandbox='off'))
+            self.assertNotIn('--sandbox', hellforge.session_arguments(paths, sandbox=False))
+
+    def test_sandbox_reason_falls_back_to_the_session_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp) / 'run'
+            run.mkdir()
+            (run / 'result.json').write_text(json.dumps({'status': 'observing', 'sandboxed': False}))
+            (run / 'session.log').write_text(
+                '12:00:00 This session is not sandboxed (the log gives the reason).\n')
+            answer = hellforge.sandbox_answer(run)
+            self.assertIs(answer['sandboxed'], False)
+            self.assertEqual(answer['sandboxNotice'],
+                             'This session is not sandboxed (the log gives the reason).')
 
 
 class Packs(unittest.TestCase):
@@ -239,6 +281,7 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual((manifest['target'], manifest['runner_pid'], manifest['hellforge_run_id']),
                          ('hellforge', RUNNER, 'run1'))
         self.assertEqual(self.runner.calls[0]['war'], 'open')
+        self.assertIs(self.runner.calls[0]['sandbox'], True, 'absent launcher setting means on')
         self.assertGreaterEqual(self.runner.calls[0]['timeout'], 300, 'a HellForge start verifies the copy first')
         self.assertIsNone(manifest['inventory_before'], "the copy's data/ is the runner's")
         agent = self.paths.mods / hellforge.AGENT_FOLDER / '9ba626afa44a3aa3.patch_0'
@@ -274,8 +317,74 @@ class Lifecycle(unittest.TestCase):
         self.assertIn('HellForge session failed', summary['not_clean_because'])
         self.assert_restored()
 
+    def test_a_sandboxed_runner_selects_the_runs_mailbox(self):
+        notes = []
+        self.runner.sandboxed, self.runner.sandbox_mode = True, 'windows-low-integrity'
+        manifest = session.start(self.paths, note=notes.append, sandbox='on')
+        run_mailbox = hellforge.sandbox_mailbox(manifest['hellforge_run'])
+        self.assertEqual(Path(manifest['mailbox']), run_mailbox)
+        self.assertEqual(session.mailbox_path(self.paths), run_mailbox)
+        self.assertIs(manifest['sandboxed'], True)
+        self.assertEqual(manifest['sandboxMode'], 'windows-low-integrity')
+        self.assertTrue(any('harness requests one' in text for text in notes))
+        self.assertTrue(any('runner reports sandboxed' in text for text in notes))
+        run_mailbox.mkdir(parents=True, exist_ok=True)
+        (run_mailbox / 'session.txt').write_text('id=recorded\n')
+        self.game.exit(0)
+        self.runner.finish()
+        summary = session.finish(self.paths, note=notes.append)
+        self.assertIs(summary['sandboxed'], True)
+        self.assertEqual(summary['sandboxMode'], 'windows-low-integrity')
+        self.assertIs(summary['hellforge']['sandboxed'], True)
+        self.assertFalse((run_mailbox / 'session.txt').exists(), 'teardown ends the recorded mailbox')
+        self.assertIsNone(State(self.paths.state).load())
+
+    def test_an_unsandboxed_answer_is_reported_and_not_retried(self):
+        notes = []
+        notice = 'This session is not sandboxed (the test runner refused it).'
+        self.runner.sandboxed, self.runner.sandbox_mode = False, 'none'
+        self.runner.sandbox_notice = notice
+        manifest = session.start(self.paths, note=notes.append, sandbox='on')
+        self.assertEqual(len(self.runner.calls), 1, 'never retried without the sandbox')
+        self.assertEqual(Path(manifest['mailbox']), self.paths.mailbox)
+        self.assertIs(manifest['sandboxed'], False)
+        self.assertEqual(manifest['sandboxMode'], 'none')
+        self.assertEqual(manifest['sandboxNotice'], notice)
+        self.assertTrue(any('runner reports unsandboxed' in text and notice in text for text in notes))
+        self.game.exit(0)
+        self.runner.finish()
+        summary = session.finish(self.paths, note=notes.append)
+        self.assertIs(summary['sandboxed'], False)
+        self.assertEqual(summary['sandboxMode'], 'none')
+        self.assertEqual(summary['sandboxNotice'], notice)
+        self.assert_restored()
+
+    def test_a_sandbox_refusal_reaches_the_launch_failure(self):
+        run = self.paths.hellforge / 'logs' / 'sessions' / 'refused'
+        run.mkdir(parents=True)
+        notice = 'This session is not sandboxed (the test runner refused it).'
+        (run / 'result.json').write_text(json.dumps({'status': 'failed', 'sandboxNotice': notice}))
+        self.assertIn(notice, hellforge._launch_failure(self.paths, run))
+
+    def test_a_sandbox_refusal_is_not_retried(self):
+        calls = []
+        notice = 'This session is not sandboxed (the test runner refused it).'
+
+        def refuse(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **k: None,
+                   sandbox=None):
+            calls.append(sandbox)
+            raise hellforge.HellForgeError('the session runner refused: %s' % notice)
+
+        with mock.patch('hd2h.hellforge.launch', refuse):
+            with self.assertRaises(session.HarnessError) as raised:
+                session.start(self.paths, note=lambda text: None, sandbox='on')
+        self.assertEqual(calls, [True])
+        self.assertIn(notice, str(raised.exception))
+        self.assert_restored()
+
     def test_failed_launch_undoes_the_preparation(self):
-        def refuse(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **k: None):
+        def refuse(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **k: None,
+                   sandbox=None):
             raise hellforge.HellForgeError('the session runner exited before the game started: copy not verified')
         with mock.patch('hd2h.hellforge.launch', refuse):
             with self.assertRaises(session.HarnessError) as raised:
@@ -366,6 +475,37 @@ class Targets(unittest.TestCase):
                     harness.resolve_paths(self.arguments('start', 'steam'))
                 with self.assertRaises(session.HarnessError):
                     harness.resolve_paths(self.arguments('smoke'))
+
+    def test_later_commands_use_the_recorded_mailbox(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_hellforge(tmp)
+            recorded = Path(tmp) / 'recorded-mailbox'
+            State(paths.state).save({'target': 'hellforge', 'pid': 1, 'agent': True, 'facts': {},
+                                     'mailbox': str(recorded)})
+            seen = []
+
+            class FakeMailbox:
+                def __init__(self, directory):
+                    self.directory = Path(directory)
+                    seen.append(self.directory)
+
+                def send(self, source, timeout):
+                    return ['sent']
+
+                def age(self, name):
+                    return 1.5
+
+                def call(self, source, timeout):
+                    return [{'state': 2}]
+
+            with mock.patch('hd2h.session.Mailbox', FakeMailbox), \
+                    mock.patch('hd2h.session.running', lambda: []):
+                self.assertEqual(harness.command_lua(paths, argparse.Namespace(
+                    file=None, code='return 1', timeout=1)), ['sent'])
+                state = harness.command_state(paths, argparse.Namespace(timeout=1))
+            self.assertEqual(seen, [recorded, recorded])
+            self.assertEqual(state['heartbeat_age_s'], 1.5)
+            self.assertEqual(state['agent'], {'state': 2})
 
 
 if __name__ == '__main__':
