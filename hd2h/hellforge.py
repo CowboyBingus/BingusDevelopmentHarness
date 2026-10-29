@@ -707,9 +707,26 @@ def end_runner(manifest, note=print, wait=120, after_signal=60):
     return _end_runner_linux(manifest, note, wait, after_signal)
 
 
+def _not_evidence(run):
+    """copytree's ignore for a Linux sandbox run: <run>/sandbox (the overlay's upper and work, whose work/work overlayfs
+    leaves mode 000) and <run>/game/prefix (the overlay's mount point and the session prefix) are not evidence."""
+    root = Path(run).resolve()
+
+    def ignore(folder, names):
+        here = Path(folder).resolve()
+        if here == root:
+            return {'sandbox'} & set(names)
+        if here == root / 'game':
+            return {'prefix'} & set(names)
+        return set()
+    return ignore
+
+
 def collect(run, target):
     """Copies the HellForge run folder into the harness run. Returns the number of files copied."""
     if not run or not Path(run).is_dir():
         return 0
-    shutil.copytree(run, target, dirs_exist_ok=True)
+    # symlinks=True: a sandboxed session home links .steam/root and .steam/steam to the Steam folder; following them
+    # would copy the whole Steam library (140 GB on 2026-10-28) into the harness run.
+    shutil.copytree(run, target, dirs_exist_ok=True, ignore=_not_evidence(run), symlinks=True)
     return sum(1 for path in Path(target).rglob('*') if path.is_file())
