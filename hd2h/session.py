@@ -218,6 +218,31 @@ def wait_for_hello(mailbox, session_id, pid, timeout=300):
     raise HarnessError('no hello from the agent within %d s (is the loader deployed and discovery working?)' % timeout)
 
 
+def mailbox_path(paths, manifest=None):
+    """The mailbox recorded for the active session; paths.mailbox is only the fallback for an old manifest."""
+    if manifest is None:
+        manifest = State(paths.state).load()
+    return Path((manifest or {}).get('mailbox') or paths.mailbox)
+
+
+def mailbox_for(paths, manifest=None):
+    """The active session's mailbox (hd2h/mailbox.py)."""
+    return Mailbox(mailbox_path(paths, manifest))
+
+
+def _report_sandbox(answer, note):
+    """Say whether the runner sandboxed this session and why."""
+    sandboxed, mode = answer.get('sandboxed'), answer.get('sandboxMode')
+    mode_text = 'sandboxMode %s' % mode if mode else 'no sandboxMode reported'
+    if sandboxed is True:
+        note('sandbox: runner reports sandboxed (%s)' % mode_text)
+    elif sandboxed is False:
+        reason = answer.get('sandboxNotice') or 'no reason in result.json or session.log'
+        note('sandbox: runner reports unsandboxed (%s): %s' % (mode_text, reason))
+    else:
+        note('sandbox: runner has not reported whether the session is sandboxed')
+
+
 def _install(paths, state, key, files):
     """Deploys files under manifest[key]: their hashes are recorded before writing, then which files
     hold them, so teardown can tell them from an identical copy a mod manager writes later."""
@@ -258,7 +283,8 @@ def _launch_steam(paths, state, session_id, mailbox, condition, agent, package_f
     return launch(launch_timeout)
 
 
-def _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, war, timeout, preset, note):
+def _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, war, timeout, preset, note,
+                      sandbox='launcher'):
     """Adds the agent (and Bingus Shared Loader, unless the installation has it) as packs in mods/, backs up the
     Mods page's settings, and starts the session runner (hd2h/hellforge.py)."""
     state.update(mods_settings=hellforge.backup_mods_settings(paths, paths.state / 'settings-backup'))
@@ -269,23 +295,29 @@ def _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, w
     note('session %s prepared (HellForge %s, profile %s, preset %s; packs %s); starting its session runner'
          % (session_id, paths.hellforge, paths.profile, preset, ', '.join(sorted(packs))))
     try:
-        _runner, pid, run_id, _run = hellforge.launch(paths, run_dir, multiplayer, war, timeout, note,
-                                                      record=lambda **facts: state.update(**facts))
+        _runner, pid, run_id, run = hellforge.launch(paths, run_dir, multiplayer, war, timeout, note,
+                                                     record=lambda **facts: state.update(**facts),
+                                                     sandbox=sandbox)
     except hellforge.HellForgeError as error:
         raise HarnessError(str(error))
+    answer = hellforge.sandbox_answer(run)
+    state.update(mailbox=str(hellforge.sandbox_mailbox(run) if answer.get('sandboxed') is True else paths.mailbox),
+                 sandboxed=answer.get('sandboxed'), sandboxMode=answer.get('sandboxMode'),
+                 sandboxNotice=answer.get('sandboxNotice'))
+    _report_sandbox(answer, note)
     note('HellForge session %s running' % run_id)
     return pid
 
 
 def start(paths, preset='private', condition='mods', agent=True, run_dir=None, note=print,
           launch_timeout=180, hello_timeout=300, take_over=True, packages=(), multiplayer=None, war=None,
-          privacy='invite'):
+          privacy='invite', sandbox='launcher'):
     """Prepares the install and launches the game. The session stays recorded until finish().
 
     take_over: end a harness session still recorded, and close a game started by anyone else,
     before preparing; otherwise refuse while either exists.
     HellForge target (paths.target): the session runner launches the copy; multiplayer and war override the
-    launcher's settings (hd2h/hellforge.session_arguments).
+    launcher's settings (hd2h/hellforge.session_arguments). sandbox: 'launcher', 'on' or 'off'.
     privacy: 'invite' (always on the Steam target) or 'public' (HellForge only, see _check_public).
     """
     if condition not in CONDITIONS:
@@ -321,6 +353,10 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
     run_dir = Path(run_dir) if run_dir else paths.runs / ('%s-%s%s' % (
         _stamp(), condition, '-hellforge' if paths.target == 'hellforge' else ''))
     target = paths.target
+    if target == 'hellforge':
+        sandbox_requested, sandbox_reason = hellforge.sandbox_choice(paths, sandbox)
+    else:
+        sandbox_requested, sandbox_reason = False, 'the Steam target has no HellForge sandbox'
     manifest = {'session': session_id, 'run': str(run_dir), 'condition': condition, 'preset': preset,
                 'agent': None, 'stash': None, 'settings': None, 'pid': None, 'created': None,
                 'started': _now(), 'started_epoch': datetime.datetime.now().timestamp(), 'facts': facts,
@@ -328,10 +364,14 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
                 # A HellForge session stages its mods into the copy's data/ itself: the harness never touches it.
                 'inventory_before': deploy.inventory(paths.data) if target == 'steam' else None,
                 'exit': None, 'quit_requested': False, 'closed_before_start': closed, 'target': target,
-                'privacy': privacy}
+                'privacy': privacy, 'mailbox': str(paths.mailbox), 'sandbox_mode': sandbox,
+                'sandbox_requested': sandbox_requested, 'sandbox_reason': sandbox_reason,
+                'sandboxed': None, 'sandboxMode': None, 'sandboxNotice': None}
     if target == 'hellforge':
         manifest.update(hellforge_root=str(paths.hellforge), profile=paths.profile, packs=None, mods_settings=None,
                         runner_pid=None, hellforge_run=None, hellforge_run_id=None)
+        note('sandbox: harness %s (%s)'
+             % ('requests one' if sandbox_requested else 'does not request one', sandbox_reason))
     state.save(manifest)
     # The next launch truncates every mod log; keep the previous session's copies with this run.
     _copy_tree(paths.logs, run_dir / 'logs-previous')
@@ -340,7 +380,7 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
                        privacy)
         if target == 'hellforge':
             pid = _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, war,
-                                    max(launch_timeout, 300), preset, note)
+                                    max(launch_timeout, 300), preset, note, sandbox=sandbox_requested)
         else:
             pid = _launch_steam(paths, state, session_id, mailbox, condition, agent, package_files, launch_timeout,
                                 preset, note)
@@ -360,7 +400,7 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
     state.update(pid=pid, created=created, launched=_now())
     note('game running, pid %d' % pid)
     if agent:
-        hello = wait_for_hello(mailbox, session_id, pid, hello_timeout)
+        hello = wait_for_hello(mailbox_for(paths, state.load()), session_id, pid, hello_timeout)
         state.update(hello=_now())
         note('agent connected (loader modules: %d)' % len(((hello.get('state') or {}).get('loader') or {})
                                                              .get('modules') or {}))
@@ -451,7 +491,7 @@ def stop(paths, kill=False, quit_timeout=90, note=print):
             how = None
             if not kill and manifest.get('agent'):
                 try:
-                    values = Mailbox(paths.mailbox).call('return agent.quit()', timeout=15)
+                    values = mailbox_for(paths, manifest).call('return agent.quit()', timeout=15)
                     if values and values[0] is True:
                         state.update(quit_requested=True)
                         note('asked the game to quit')
@@ -565,7 +605,7 @@ def teardown(paths):
     if manifest is None:
         return []
     if manifest.get('agent'):
-        Mailbox(paths.mailbox).end()
+        mailbox_for(paths, manifest).end()
     if manifest.get('target') == 'hellforge':
         problems = hellforge.remove_packs(paths, manifest.get('packs'))
         problems += hellforge.restore_mods_settings(manifest.get('mods_settings'))
@@ -630,14 +670,19 @@ def _finish(paths, note):
     run_dir = Path(manifest['run'])
     run_dir.mkdir(parents=True, exist_ok=True)
     logs, stale_logs = _copy_logs(paths.logs, run_dir, manifest.get('started_epoch'))
-    Mailbox(paths.mailbox).archive_to(run_dir / 'agent')
+    mailbox_for(paths, manifest).archive_to(run_dir / 'agent')
     hellforge_summary = None
+    sandboxed = sandbox_mode = sandbox_notice = None
     if manifest.get('target') == 'hellforge':
         run = manifest.get('hellforge_run')
         outcome = hellforge.result(run)
+        sandbox = hellforge.sandbox_answer(run)
+        sandboxed, sandbox_mode, sandbox_notice = (sandbox.get('sandboxed'), sandbox.get('sandboxMode'),
+                                                   sandbox.get('sandboxNotice'))
         hellforge_summary = {'run_id': manifest.get('hellforge_run_id'), 'run': run,
                              'status': outcome.get('status'), 'failure': outcome.get('failure'),
-                             'runner_end': manifest.get('runner_end'),
+                             'runner_end': manifest.get('runner_end'), 'sandboxed': sandboxed,
+                             'sandboxMode': sandbox_mode, 'sandboxNotice': sandbox_notice,
                              'files_collected': hellforge.collect(run, run_dir / 'hellforge-session')}
         if not IS_WINDOWS:
             # The wrapper and the runner outlive the game: result.json is the reliable exit code on Linux.
@@ -656,7 +701,7 @@ def _finish(paths, note):
                 new_dumps.append({'file': name, 'kind': 'unreadable', 'meaning': str(error)})
         else:
             new_dumps.append({'file': name, 'kind': 'other'})
-    mailbox = Mailbox(paths.mailbox)
+    mailbox = mailbox_for(paths, manifest)
     bye = mailbox.read('bye') if manifest.get('agent') else None
     problems = teardown(paths)
     new_saves = settings.new_save_files(paths, manifest['settings']) if manifest.get('settings') else []
@@ -700,6 +745,7 @@ def _finish(paths, note):
                'target': manifest.get('target') or 'steam', 'privacy': manifest.get('privacy') or 'invite'}
     if hellforge_summary:
         summary['hellforge'] = hellforge_summary
+        summary.update(sandboxed=sandboxed, sandboxMode=sandbox_mode, sandboxNotice=sandbox_notice)
     (run_dir / 'run.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
     if problems:
         kept = 'to resolve by hand' if (state.load() or {}).get('outside_redeploy') else 'for `recover`'

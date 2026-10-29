@@ -329,11 +329,56 @@ def restore_mods_settings(entry):
     return []
 
 
-def session_arguments(paths, multiplayer=None, war=None):
+def sandbox_choice(paths, mode='launcher'):
+    """(whether to ask for a sandbox, why) for mode 'launcher', 'on' or 'off'. True and False are the force modes."""
+    if mode is True or mode == 'on':
+        return True, "'on' forces the sandbox on"
+    if mode is False or mode == 'off':
+        return False, "'off' forces the sandbox off"
+    if mode not in (None, 'launcher'):
+        raise ValueError("sandbox mode must be 'launcher', 'on' or 'off'")
+    launcher = _json(paths.hellforge / 'launcher-settings.json') or {}
+    if 'sandboxed' not in launcher:
+        return True, 'the launcher setting sandboxed is absent (the launcher default is on)'
+    sandboxed = launcher['sandboxed'] is not False
+    return sandboxed, 'the launcher setting sandboxed is %s' % json.dumps(launcher['sandboxed'])
+
+
+def sandbox_mailbox(run):
+    """The agent mailbox of a sandboxed session, inside the run's copied environment."""
+    return Path(run) / 'game' / 'environment' / 'Local' / 'CowboyBingus' / 'Helldivers2' / 'TestAgent'
+
+
+def sandbox_answer(run):
+    """The runner's sandbox answer from result.json, with the session log's notice as its reason."""
+    if not run:
+        return {'sandboxed': None, 'sandboxMode': None, 'sandboxNotice': None}
+    outcome = result(run)
+    sandboxed = outcome.get('sandboxed')
+    notice = outcome.get('sandboxNotice')
+    if not notice and sandboxed is not True:
+        try:
+            for line in Path(run, 'session.log').read_text(encoding='utf-8', errors='replace').splitlines():
+                marker = 'This session is not sandboxed'
+                if marker in line:
+                    notice = line[line.index(marker):].strip()
+                    break
+        except OSError:
+            pass
+    if sandboxed is None:
+        if notice:
+            sandboxed = False
+        elif sandbox_mailbox(run).is_dir():
+            sandboxed = True
+    return {'sandboxed': sandboxed, 'sandboxMode': outcome.get('sandboxMode'), 'sandboxNotice': notice}
+
+
+def session_arguments(paths, multiplayer=None, war=None, sandbox=None):
     """The runner's command line, as the launcher builds it from its settings (SessionRunner.Start).
 
     multiplayer: None follows the launcher (Local PlayFab and the stand-ins), True or False sets both.
     war: None follows the launcher; 'live', 'open' or 'frozen'.
+    sandbox: None follows launcher-settings.json (absent means on), True or False forces it.
     """
     launcher = _json(paths.hellforge / 'launcher-settings.json') or {}
     template = (_json(paths.hellforge_profile / 'launcher.json') or {}).get('template') or 'unlock-all'
@@ -352,6 +397,9 @@ def session_arguments(paths, multiplayer=None, war=None):
         arguments.append('--open-war')
     if launcher.get('engineLog'):
         arguments.append('--engine-log')
+    sandboxed, _ = sandbox_choice(paths, sandbox)
+    if sandboxed:
+        arguments.append('--sandbox')
     if not IS_WINDOWS:
         # The runner is a Windows program under Proton: the launcher hands it Wine paths (SessionRunner.cs).
         prefix = wine_prefix(paths.hellforge)
@@ -395,6 +443,8 @@ def _wrapper_log_tail(paths, lines=5):
 def _launch_failure(paths, run):
     """The runner's result or the logs that explain a launch that stopped before the game started."""
     failure = result(run).get('failure') if run else None
+    if not failure and run:
+        failure = sandbox_answer(run).get('sandboxNotice')
     if failure:
         return failure
     if IS_WINDOWS:
@@ -495,16 +545,17 @@ def _steam_pid_mismatch_linux():
 steam_pid_mismatch = _steam_pid_mismatch_windows if IS_WINDOWS else _steam_pid_mismatch_linux
 
 
-def launch(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **facts: None):
+def launch(paths, run_dir, multiplayer=None, war=None, timeout=300, note=print, record=lambda **facts: None,
+           sandbox=None):
     """Starts a session; returns (runner pid, game pid, run id, run folder) once the copy's game runs.
 
     record(runner_pid=...) runs as soon as the runner exists and record(hellforge_run=..., hellforge_run_id=...) as
     soon as its run folder does, so a start that fails part-way can still stop the runner. The runner reports
     through its run folder. It fails before the game starts when the copy, Steam ownership or the network block is
-    not right; that failure is raised with the runner's own words.
+    not right; that failure is raised with the runner's own words. sandbox: see session_arguments.
     """
     before, _ = current_run(paths)
-    runner = _spawn(session_arguments(paths, multiplayer, war), paths, run_dir)
+    runner = _spawn(session_arguments(paths, multiplayer, war, sandbox), paths, run_dir)
     record(runner_pid=runner)
     note('session runner started (pid %d)' % runner)
     deadline, recorded = time.monotonic() + timeout, None

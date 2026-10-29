@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 
 from . import builds, capture, mission, navigate, session, settings, winapi
-from .mailbox import Mailbox, MailboxError
+from .mailbox import MailboxError
 from .state import State
 
 STUCK_STATUSES = ('loading',)
@@ -125,7 +125,7 @@ def smoke(paths, preset='light', settle=20, note=print, take_over=True, ship=Tru
     expected = int(settings.PRIVACY[privacy])
     wanted = builds.PRIVACY[expected]
     build = builds.KNOWN.get(manifest['facts'].get('build') or '')
-    mailbox, snapshot, reads, ship_reads = Mailbox(paths.mailbox), None, None, None
+    mailbox, snapshot, reads, ship_reads = session.mailbox_for(paths, manifest), None, None, None
     try:
         snapshot = wait_ready(mailbox, manifest['pid'], settle=settle, note=note)
         reads = session.live_reads(manifest['pid'], build)
@@ -177,7 +177,7 @@ def _monitor(paths, manifest, minutes, note, heartbeat_limit=90, poll=5):
     'exited', 'hang' or 'public-lobby'."""
     pid, agent = manifest['pid'], bool(manifest.get('agent'))
     build = builds.KNOWN.get(manifest['facts'].get('build') or '')
-    mailbox, started = Mailbox(paths.mailbox), time.monotonic()
+    mailbox, started = session.mailbox_for(paths, manifest), time.monotonic()
     end = started + minutes * 60
     with winapi.Process(pid) as process:
         while time.monotonic() < end:
