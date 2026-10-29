@@ -42,7 +42,7 @@ from pathlib import Path
 import sys
 
 from hd2h import archive, capture, deploy, dumps, galaxy, hellforge, mission, navigate, scenarios, session, settings, winapi
-from hd2h.mailbox import Mailbox, MailboxError
+from hd2h.mailbox import MailboxError
 from hd2h.paths import TARGETS, Paths
 from hd2h.state import State
 
@@ -50,6 +50,7 @@ from hd2h.state import State
 # target is recorded.
 STARTING = ('start', 'smoke', 'soak')
 MULTIPLAYER = {'launcher': None, 'on': True, 'off': False}
+SANDBOX = {'launcher': 'launcher', 'on': 'on', 'off': 'off'}
 
 
 def emit(value):
@@ -60,7 +61,7 @@ def command_lua(paths, args):
     source = Path(args.file).read_text(encoding='utf-8') if args.file else args.code
     if not source:
         raise SystemExit('give Lua code or --file')
-    return Mailbox(paths.mailbox).send(source, timeout=args.timeout)
+    return session.mailbox_for(paths, launched(paths)).send(source, timeout=args.timeout)
 
 
 def command_state(paths, args):
@@ -69,7 +70,7 @@ def command_state(paths, args):
                                                                        'started', 'run')},
               'running': session.running()}
     if manifest and manifest.get('agent'):
-        mailbox = Mailbox(paths.mailbox)
+        mailbox = session.mailbox_for(paths, manifest)
         result['heartbeat_age_s'] = mailbox.age('heartbeat')
         try:
             result['agent'] = mailbox.call('return agent.state()', timeout=args.timeout)[0]
@@ -187,6 +188,9 @@ def main(argv=None):
                             'every option by default, or ZIP::Option A|Option B')
     start.add_argument('--condition', choices=session.CONDITIONS, default='mods',
                        help='mods; loader-only (only the loader patch + agent); vanilla (no patches, no agent)')
+    start.add_argument('--sandbox', choices=sorted(SANDBOX), default='launcher',
+                       help="HellForge target: launcher follows launcher-settings.json (absent means on); on or off "
+                            'forces the sandbox')
     add_hellforge_arguments(start)
     lua = sub.add_parser('lua')
     lua.add_argument('code', nargs='?')
@@ -254,8 +258,11 @@ def main(argv=None):
             manifest = session.start(paths, preset=args.preset, condition=args.condition,
                                      agent=args.condition != 'vanilla', note=note, take_over=not args.keep_running,
                                      packages=tuple(args.package), multiplayer=MULTIPLAYER[args.multiplayer],
-                                     war=None if args.war == 'launcher' else args.war, privacy=args.privacy)
-            emit({k: manifest.get(k) for k in ('session', 'pid', 'condition', 'preset', 'run')})
+                                     war=None if args.war == 'launcher' else args.war, privacy=args.privacy,
+                                     sandbox=SANDBOX[args.sandbox])
+            emit({k: manifest.get(k) for k in ('session', 'pid', 'condition', 'preset', 'run', 'mailbox',
+                                               'sandbox_mode', 'sandbox_requested', 'sandbox_reason',
+                                               'sandboxed', 'sandboxMode', 'sandboxNotice')})
         elif args.command == 'lua':
             emit(command_lua(paths, args))
         elif args.command == 'ship':

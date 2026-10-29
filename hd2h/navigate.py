@@ -8,7 +8,7 @@ the ship (state 3). The agent calls that one function; the harness watches the s
 import time
 
 from . import builds, session
-from .mailbox import Mailbox, MailboxError
+from .mailbox import MailboxError
 from .state import State
 
 # Runs inside the game through the agent. Guards: the game object exists, the game is on the
@@ -44,7 +44,7 @@ def to_ship(paths, manifest, note=print, press_timeout=180, ship_timeout=300, se
         raise NavigationError('unknown game build: no navigation offsets')
     if not manifest.get('agent'):
         raise NavigationError('navigation needs the agent (mods condition)')
-    pid, mailbox = manifest['pid'], Mailbox(paths.mailbox)
+    pid, mailbox = manifest['pid'], session.mailbox_for(paths, manifest)
     deadline, pressed, last = time.monotonic() + press_timeout, False, None
     while time.monotonic() < deadline:
         reads = session.live_reads(pid, build)

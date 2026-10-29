@@ -136,9 +136,7 @@ def start(paths, role, directory, game_options, note, timeout=420, strangers=Fal
     """Starts one installation's sandboxed session with the several-instances switches; returns (game pid, run).
     strangers: HELLFORGE_TEST_STRANGERS=1, the two are not friends (no presence; the lobby directory's stranger path)."""
     me, other = (0, 1) if role == 'host' else (1, 0)
-    arguments = hellforge.session_arguments(paths, multiplayer=True)
-    if sys.platform == 'win32':
-        arguments.append('--sandbox')
+    arguments = hellforge.session_arguments(paths, multiplayer=True, sandbox=True)
     arguments += ['--game-options', game_options]
     switches = {
         'HELLFORGE_MULTI_INSTANCE': '1',
@@ -537,6 +535,8 @@ def stop(note=print, wait=120):
             problems += hellforge.restore_mods_settings(data['mods_settings'])
         problems += restore_window(data.get('window'))
         Mailbox(_environment(paths.hellforge)).end()
+        if data.get('run'):
+            _sandbox_mailbox(data['run']).end()
     if not problems and RECORD.exists():
         RECORD.unlink()
     for problem in problems:

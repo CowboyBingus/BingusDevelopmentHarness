@@ -159,6 +159,8 @@ install (`hd2h/hellforge.py`). Options:
 - `--profile`: the profile, default the launcher's selected one.
 - On `start` and `smoke`, `--multiplayer launcher|on|off` and `--war launcher|live|open|frozen`. Both default to the
   launcher's settings.
+- On `start`, `--sandbox launcher|on|off` (default `launcher`). `launcher` follows `sandboxed` in
+  `launcher-settings.json`, where absent means on; `on` and `off` force it.
 
 Commands after `start` (`lua`, `ship`, `stop`, ...) follow the recorded session's target. A command that starts a
 session of the other target is refused while one is recorded.
@@ -170,6 +172,9 @@ How it differs from the Steam target:
   runs the local backend and stages the mods.
   - The harness starts it detached, so `start` returns while the session runs.
   - A failure before the game starts is reported with the runner's own words.
+  - When the choice is sandboxed, the harness passes `--sandbox` to the runner on Windows and Linux. The runner and
+    wrapper decide whether they can honour it. If the session is refused or runs unsandboxed, `start` says so with the
+    reason from the session log ("This session is not sandboxed (...)"), records it, and never retries unsandboxed.
   - `start` refuses when the Steam process id this process reads from the registry is not a running `steam.exe`
     (the game would stop at "STEAM NOT DETECTED"). An app container with its own registry layer can hold a stale
     copy; run the harness from a normal terminal then.
@@ -182,7 +187,9 @@ How it differs from the Steam target:
 - **Settings.** They live in `<root>/userdata/profiles/<profile>`. The preset (Invite Only) goes into every
   `saves/*_user_settings.config`: the profile can hold the game's own file and one imported from the normal game.
 - **Mailbox and logs.** The game runs with `LOCALAPPDATA` in `<root>/userdata/environment/Local`, so the agent
-  mailbox and the mod logs are there. Dumps are in `<root>/userdata/dumps`.
+  mailbox and the mod logs are there. A sandboxed session copies that environment into its run folder and uses
+  `<run>/game/environment/Local/CowboyBingus/Helldivers2/TestAgent` instead; the harness records which mailbox the
+  session uses, and every later command reads that one. Dumps are in `<root>/userdata/dumps`.
 - **Ending.** The session ends when the game exits (the agent's quit, WM_CLOSE or a kill).
   - `finish` then waits for the runner to stop the backend and restore the copy.
   - If the runner does not finish, `finish` writes `stop-observation.signal` into its run folder, and gives up after
@@ -231,7 +238,8 @@ own process group. `stop` and `finish` first write `stop-observation.signal` int
 request), wait for the wrapper, and only then send SIGTERM and, if needed, SIGKILL to the wrapper's whole process group,
 so `hf-inner.sh`, Proton, the backend and the game do not survive. The run folder is `logs/sessions/<runId>`; the
 pointer in `logs/play-session.json` is converted from the installation's own Wine prefix (`C:\...`) or `Z:\...` to a
-host path, and `result.json` supplies `status` and `gameExitCode`.
+host path, and `result.json` supplies `status`, `gameExitCode`, `sandboxed` and `sandboxMode`. A runner that reports
+the session unsandboxed is not retried: `start` prints its `sandboxNotice` and the run summary keeps the answer.
 
 Works: `preflight`, `start`, `stop`, `finish`, `recover`, `watch`, `lua`, the mailbox, mod packs and the file-based
 commands. Not available or not verified:
@@ -309,6 +317,7 @@ python harness.py preflight                    # install facts (needs the game c
 python harness.py close                        # close a running game (WM_CLOSE, then terminate)
 python harness.py smoke [--ship] [--package ZIP]...  # launch -> settle -> snapshot (on the ship) -> quit -> verify
 python harness.py start [--preset light] [--condition mods|loader-only|vanilla|packages] [--package ZIP]...
+                                               # HellForge: [--sandbox launcher|on|off] (default launcher)
 python harness.py ship                         # title screen -> ship, no input
 python harness.py mission [--difficulty N] [--planet ID | --faction terminid|automaton|illuminate] [--shots]
                                                # ship -> a solo mission until the player has control
