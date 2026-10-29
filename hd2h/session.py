@@ -142,6 +142,17 @@ def _end(pid, process, note, close_timeout, kill_timeout, graceful=True):
     return 'kill'
 
 
+def exit_code_number(code):
+    """HellForge's result names the game's exit code as text ("0x00000000"); the cleanliness check compares numbers, so a
+    clean quit read back as text was reported as not clean. Text that is not a number is kept as it is."""
+    if isinstance(code, str):
+        try:
+            return int(code, 16) if code.lower().startswith('0x') else int(code)
+        except ValueError:
+            return code
+    return code
+
+
 CRASH_HANDLER_EXE = 'crs-handler.exe'
 
 
@@ -708,7 +719,7 @@ def _finish(paths, note):
     exit_info = manifest.get('exit') or {}
     if hellforge_summary and not IS_WINDOWS and exit_info.get('code') is None:
         if hellforge_summary.get('game_exit_code') is not None:
-            exit_info = dict(exit_info, code=hellforge_summary['game_exit_code'])
+            exit_info = dict(exit_info, code=exit_code_number(hellforge_summary['game_exit_code']))
     crashed = [d for d in new_dumps if d.get('kind') not in ('other',)]
     if crashed:
         outcome = 'crash'
