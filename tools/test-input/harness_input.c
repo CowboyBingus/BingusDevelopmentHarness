@@ -11,6 +11,13 @@
  * first frame, its released bit after the last), and this frame's share of the mouse motion as axis 0 (zeroed once
  * when the motion ends). Devices are told apart by their vtables (keyboard exe+0x168A828, mouse exe+0x168A740).
  *
+ * The engine passes input on to the game only while its window has focus: the window's update (exe+0x6156C6) sets the
+ * focus flag, window + 0x41, to GetForegroundWindow() == its HWND (+0x50) every frame, before the devices update; the
+ * window is the first of [[exe+0x1A10210] + 0x3C0] (count +0x3B8), as Window.has_focus (exe+0x3FF7B0) reads it. A game
+ * started in the background, or one the user clicked away from, has it 0 and ignores the harness's presses. So while
+ * the harness drives anything (a held button or a look), the keyboard's update sets the flag to 1 for that frame; it goes
+ * back to the real focus on the next frame after, so the game never acts focused while the user is at the desktop.
+ *
  * The harness calls harness_input(command) from its in-game Lua (LuaJIT's ffi), on the game thread:
  *   key <index> <seconds>             hold a keyboard button (stingray.Keyboard.button_index(name) gives the index)
  *   mouse <index> <seconds>           hold a mouse button (0 left, 1 right; stingray.Mouse.button_index)
@@ -30,6 +37,9 @@
 #define KEYBOARD_VTABLE 0x168A828u
 #define MOUSE_VTABLE 0x168A740u
 #define MAX_HOLDS 32
+#define WINDOW_FOCUS_CODE 0x6156C6u  /* call [GetForegroundWindow]; cmp rax,[rbx+0x50]; sete al; mov [rbx+0x41],al */
+#define WINDOWS 0x1A10210u
+#define WINDOW_FOCUS 0x41u
 
 typedef void (*UpdateFn)(uintptr_t device);
 
@@ -49,6 +59,8 @@ static Hold g_holds[MAX_HOLDS];
 static double g_lookX, g_lookY, g_lookUntil, g_lastMouse;
 static int g_looking;
 static int g_logged;
+static int g_focus;   /* the window's focus flag can be set (the code matched) */
+static int g_active;  /* the harness drove something this frame */
 
 static double Now(void)
 {
@@ -71,10 +83,23 @@ static void Button(uintptr_t device, uint32_t index, float value, uint32_t edgeO
     if (edgeOffset && Read(device + edgeOffset, &edges, sizeof edges) && edges) ((uint32_t*)edges)[index >> 5] |= 1u << (index & 31);
 }
 
+/* The engine's window marked focused for this frame. */
+static void Focus(void)
+{
+    uintptr_t windows = 0, list = 0, window = 0;
+    uint32_t count = 0;
+    if (!Read(g_exe + WINDOWS, &windows, sizeof windows) || !windows || !Read(windows + 0x3B8, &count, sizeof count) ||
+        count == 0 || !Read(windows + 0x3C0, &list, sizeof list) || !list || !Read(list, &window, sizeof window) || !window)
+        return;
+    *(volatile uint8_t*)(window + WINDOW_FOCUS) = 1;
+}
+
 static void Apply(uintptr_t device, int mouse)
 {
     double now = Now();
     AcquireSRWLockExclusive(&g_lock);
+    g_active = now < g_lookUntil;
+    for (int i = 0; i < MAX_HOLDS; i++) g_active |= g_holds[i].used;
     for (int i = 0; i < MAX_HOLDS; i++)
     {
         Hold* h = &g_holds[i];
@@ -117,7 +142,9 @@ static uintptr_t VTable(uintptr_t device)
 static void KeyboardDetour(uintptr_t device)
 {
     g_keyboardUpdate(device);
-    if (VTable(device) == g_exe + KEYBOARD_VTABLE) Apply(device, 0);
+    if (VTable(device) != g_exe + KEYBOARD_VTABLE) return;
+    Apply(device, 0);
+    if (g_active && g_focus) Focus();
 }
 
 static void MouseDetour(uintptr_t device)
@@ -194,7 +221,8 @@ static void OnGameLoaded(HfMod* mod, HfEvent event, void* user)
         g_api->log(mod, "input: could not hook the controllers' updates");
         return;
     }
-    g_api->log(mod, "input: ready (harness_input)");
+    g_focus = g_api->code_matches(g_exe + WINDOW_FOCUS_CODE, "FF 15 D4 1A DE 00 48 3B 43 50 0F 94 C0 88 43 41");
+    g_api->log(mod, "input: ready (harness_input)%s", g_focus ? "" : "; the window's focus check differs: input only while focused");
 }
 
 HF_MOD_EXPORT int hellforge_mod_init(const HfApi* api, HfMod* mod)
