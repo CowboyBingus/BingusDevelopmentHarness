@@ -4,6 +4,9 @@
   python harness.py close                      close a running game (WM_CLOSE, then terminate)
   python harness.py start [--preset light]     close any running game, prepare (Invite Only, agent), launch
   python harness.py lua "return agent.state()" run Lua inside the game (the agent's helpers are `agent`)
+  python harness.py input "key w 2; look 300 0 1; mouse left 0.2"
+                                               HellForge target: press keys and mouse buttons and move the
+                                               mouse inside the engine (tools/test-input, deployed once built)
   python harness.py state                      agent state plus live game state, mission and privacy
   python harness.py ship                       press continue on the title screen, wait for the ship
   python harness.py mission [--difficulty N] [--planet ID | --faction F [--pick N]] [--shots]
@@ -62,6 +65,33 @@ def command_lua(paths, args):
     if not source:
         raise SystemExit('give Lua code or --file')
     return session.mailbox_for(paths, launched(paths)).send(source, timeout=args.timeout)
+
+
+# The input command's Lua: names to button indices, then the test input mod's export (tools/test-input).
+INPUT_LUA = r"""
+local ffi = require('ffi')
+pcall(ffi.cdef, [[void* GetModuleHandleA(const char*); void* GetProcAddress(void*, const char*);]])
+local module = ffi.C.GetModuleHandleA('harness_input.dll')
+if module == nil then return nil, 'the test input mod is not loaded (build tools/test-input, then start again)' end
+local call = ffi.cast('int(*)(const char*)', ffi.C.GetProcAddress(module, 'harness_input'))
+local parts = {}
+for part in string.gmatch(%s, '[^;]+') do
+  local verb, name, rest = part:match('^%%s*(%%S+)%%s*(%%S*)%%s*(.-)%%s*$')
+  if (verb == 'key' or verb == 'mouse') and not tonumber(name) then
+    local device = verb == 'key' and stingray.Keyboard or stingray.Mouse
+    local index = device.button_index(name)
+    if index == nil then return nil, 'no ' .. verb .. ' button named ' .. name end
+    name = tostring(index)
+  end
+  parts[#parts + 1] = verb .. ' ' .. name .. ' ' .. rest
+end
+return call(table.concat(parts, ';'))
+"""
+
+
+def command_input(paths, args):
+    code = INPUT_LUA % json.dumps(args.commands)
+    return session.mailbox_for(paths, launched(paths)).send(code, timeout=args.timeout)
 
 
 def command_state(paths, args):
@@ -192,10 +222,17 @@ def main(argv=None):
                        help="HellForge target: launcher follows launcher-settings.json (absent means on); on or off "
                             'forces the sandbox')
     add_hellforge_arguments(start)
+    start.add_argument('--mod', action='append', default=[], metavar='DIR',
+                       help='HellForge target: a mod folder to add for this session (repeatable; removed at finish)')
     lua = sub.add_parser('lua')
     lua.add_argument('code', nargs='?')
     lua.add_argument('--file')
     lua.add_argument('--timeout', type=float, default=15)
+    input_parser = sub.add_parser('input', help='press keys/mouse buttons and move the mouse inside the engine '
+                                                 '(HellForge target; tools/test-input built)')
+    input_parser.add_argument('commands', help="'key <name|index> <s>; mouse <name|index> <s>; look <dx/s> <dy/s> <s>; "
+                                               "clear', separated by ';' (names: stingray.Keyboard/Mouse.button_index)")
+    input_parser.add_argument('--timeout', type=float, default=15)
     state = sub.add_parser('state')
     state.add_argument('--timeout', type=float, default=15)
     stop = sub.add_parser('stop')
@@ -259,12 +296,14 @@ def main(argv=None):
                                      agent=args.condition != 'vanilla', note=note, take_over=not args.keep_running,
                                      packages=tuple(args.package), multiplayer=MULTIPLAYER[args.multiplayer],
                                      war=None if args.war == 'launcher' else args.war, privacy=args.privacy,
-                                     sandbox=SANDBOX[args.sandbox])
+                                     sandbox=SANDBOX[args.sandbox], mods=tuple(args.mod))
             emit({k: manifest.get(k) for k in ('session', 'pid', 'condition', 'preset', 'run', 'mailbox',
                                                'sandbox_mode', 'sandbox_requested', 'sandbox_reason',
                                                'sandboxed', 'sandboxMode', 'sandboxNotice')})
         elif args.command == 'lua':
             emit(command_lua(paths, args))
+        elif args.command == 'input':
+            emit(command_input(paths, args))
         elif args.command == 'ship':
             emit(navigate.to_ship(paths, launched(paths), note=note))
         elif args.command == 'mission':

@@ -295,11 +295,11 @@ def _launch_steam(paths, state, session_id, mailbox, condition, agent, package_f
 
 
 def _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, war, timeout, preset, note,
-                      sandbox='launcher'):
+                      sandbox='launcher', mods=()):
     """Adds the agent (and Bingus Shared Loader, unless the installation has it) as packs in mods/, backs up the
     Mods page's settings, and starts the session runner (hd2h/hellforge.py)."""
     state.update(mods_settings=hellforge.backup_mods_settings(paths, paths.state / 'settings-backup'))
-    packs = hellforge.pack_files(paths, paths.agent_source.read_bytes())
+    packs = hellforge.pack_files(paths, paths.agent_source.read_bytes(), mods=mods)
     hellforge.install_packs(paths, packs, lambda hashes: state.update(packs=hashes))
     state.update(agent={'pack': hellforge.AGENT_FOLDER})
     mailbox.begin(session_id)
@@ -322,7 +322,7 @@ def _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, w
 
 def start(paths, preset='private', condition='mods', agent=True, run_dir=None, note=print,
           launch_timeout=180, hello_timeout=300, take_over=True, packages=(), multiplayer=None, war=None,
-          privacy='invite', sandbox='launcher'):
+          privacy='invite', sandbox='launcher', mods=()):
     """Prepares the install and launches the game. The session stays recorded until finish().
 
     take_over: end a harness session still recorded, and close a game started by anyone else,
@@ -330,11 +330,14 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
     HellForge target (paths.target): the session runner launches the copy; multiplayer and war override the
     launcher's settings (hd2h/hellforge.session_arguments). sandbox: 'launcher', 'on' or 'off'.
     privacy: 'invite' (always on the Steam target) or 'public' (HellForge only, see _check_public).
+    mods: mod folders (HellForge only) added as packs for this session and removed by finish/recover.
     """
     if condition not in CONDITIONS:
         raise HarnessError('condition must be one of %s' % ', '.join(CONDITIONS))
     if privacy == 'public':
         _check_public(paths, multiplayer)
+    if mods and paths.target != 'hellforge':
+        raise HarnessError('--mod folders are for the HellForge target')
     if paths.target == 'hellforge' and (condition != 'mods' or packages or not agent):
         raise HarnessError('HellForge sessions run the mods condition with the agent (its packs go into mods/)')
     if condition == 'vanilla' and agent:
@@ -391,7 +394,7 @@ def start(paths, preset='private', condition='mods', agent=True, run_dir=None, n
                        privacy)
         if target == 'hellforge':
             pid = _launch_hellforge(paths, state, session_id, mailbox, run_dir, multiplayer, war,
-                                    max(launch_timeout, 300), preset, note, sandbox=sandbox_requested)
+                                    max(launch_timeout, 300), preset, note, sandbox=sandbox_requested, mods=mods)
         else:
             pid = _launch_steam(paths, state, session_id, mailbox, condition, agent, package_files, launch_timeout,
                                 preset, note)
