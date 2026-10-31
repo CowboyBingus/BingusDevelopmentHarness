@@ -5,10 +5,11 @@
  * Build 25480438's input controllers (helldivers2.exe): each device is an object whose vtable's slot 5 is its update
  * (keyboard exe+0x5AD320, mouse exe+0x5A8C10) and slot 1 the frame's reset. The update writes each button's value, a
  * float, at [device+0x38][index] (1.0 down) and sets bit `index` in the pressed words at [device+0xD0] or the released
- * words at [device+0xE8]; the reset clears those words. The mouse's axes are Vector3s at [device+0x138]; axis 0 is the
- * motion ("mouse"). This mod hooks both updates and, after the engine's own, applies what the harness asked for: a held
- * button's value 1.0 (its pressed bit on the first frame, its released bit after the last), and the mouse motion added
- * to axis 0. Devices are told apart by their vtables (keyboard exe+0x168A828, mouse exe+0x168A740).
+ * words at [device+0xE8]; the reset clears those words. The mouse's axes this frame are Vector3s at [device+0x108]
+ * (Mouse.axis reads them; axis 0 is the motion, 2 the cursor; +0x138 keeps a running total). This mod hooks both updates
+ * and, after the engine's own, applies what the harness asked for: a held button's value 1.0 (its pressed bit on the
+ * first frame, its released bit after the last), and this frame's share of the mouse motion as axis 0 (zeroed once
+ * when the motion ends). Devices are told apart by their vtables (keyboard exe+0x168A828, mouse exe+0x168A740).
  *
  * The harness calls harness_input(command) from its in-game Lua (LuaJIT's ffi), on the game thread:
  *   key <index> <seconds>             hold a keyboard button (stingray.Keyboard.button_index(name) gives the index)
@@ -46,6 +47,7 @@ static UpdateFn g_keyboardUpdate, g_mouseUpdate;
 static SRWLOCK g_lock = SRWLOCK_INIT;
 static Hold g_holds[MAX_HOLDS];
 static double g_lookX, g_lookY, g_lookUntil, g_lastMouse;
+static int g_looking;
 static int g_logged;
 
 static double Now(void)
@@ -94,12 +96,14 @@ static void Apply(uintptr_t device, int mouse)
         g_lastMouse = now;
         if (dt > 0.1) dt = 0.1;
         uintptr_t axes = 0;
-        if (now < g_lookUntil && Read(device + 0x138, &axes, sizeof axes) && axes)
+        int looking = now < g_lookUntil;
+        if ((looking || g_looking) && Read(device + 0x108, &axes, sizeof axes) && axes)
         {
             float* motion = (float*)axes;
-            motion[0] += (float)(g_lookX * dt);
-            motion[1] += (float)(g_lookY * dt);
+            motion[0] = looking ? (float)(g_lookX * dt) : 0.0f;
+            motion[1] = looking ? (float)(g_lookY * dt) : 0.0f;
         }
+        g_looking = looking;
     }
     ReleaseSRWLockExclusive(&g_lock);
 }
