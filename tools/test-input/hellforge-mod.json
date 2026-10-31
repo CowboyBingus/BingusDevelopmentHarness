@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "id": "harness.test-input",
+  "name": "Harness test input",
+  "version": "0.1.0",
+  "description": "Test only: the harness presses keys and moves the mouse inside the engine. Never ship.",
+  "gameplay": false,
+  "code": {
+    "dll": "harness_input.dll",
+    "sdk": 13
+  }
+}

@@ -204,8 +204,33 @@ class Packs(unittest.TestCase):
 
     def test_installation_loader_is_kept(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(set(hellforge.pack_files(fake_hellforge(tmp, own_loader=True), AGENT)),
-                             {hellforge.AGENT_FOLDER})
+            packs = set(hellforge.pack_files(fake_hellforge(tmp, own_loader=True), AGENT))
+            self.assertIn(hellforge.AGENT_FOLDER, packs)
+            self.assertNotIn(hellforge.LOADER_FOLDER, packs)
+
+    def test_input_pack_once_built(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'test-input'
+            source.mkdir()
+            with mock.patch.object(hellforge, 'INPUT_SOURCE', source):
+                paths = fake_hellforge(tmp, own_loader=True)
+                self.assertNotIn(hellforge.INPUT_FOLDER, hellforge.pack_files(paths, AGENT), 'not built: no pack')
+                for name in hellforge.INPUT_FILES:
+                    (source / name).write_bytes(name.encode())
+                packs = hellforge.pack_files(paths, AGENT)
+                self.assertEqual(packs[hellforge.INPUT_FOLDER]['harness_input.dll'], b'harness_input.dll')
+
+    def test_mod_folders_become_packs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mod = Path(tmp) / 'first-person'
+            (mod / 'sub').mkdir(parents=True)
+            (mod / 'hellforge-mod.json').write_text('{}')
+            (mod / 'sub' / 'x.dll').write_bytes(b'dll')
+            paths = fake_hellforge(tmp, own_loader=True)
+            packs = hellforge.pack_files(paths, AGENT, mods=(mod,))
+            self.assertEqual(packs['zz-test-first-person'], {'hellforge-mod.json': b'{}', 'sub/x.dll': b'dll'})
+            with self.assertRaises(hellforge.HellForgeError):
+                hellforge.pack_files(paths, AGENT, mods=(Path(tmp) / 'nothing',))
 
     def test_loader_pack_comes_from_the_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

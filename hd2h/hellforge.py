@@ -34,6 +34,10 @@ from .paths import GAME_EXE, HARNESS, STEAM_APP_ID
 RUNNER_EXE = 'HellForge.Session.exe'
 AGENT_FOLDER = 'zz-harness-agent'
 LOADER_FOLDER = 'zz-harness-loader'
+INPUT_FOLDER = 'zz-harness-input'
+# The test input mod (tools/test-input): deployed with the agent once it has been built (tools/test-input/build.sh).
+INPUT_SOURCE = Path(__file__).resolve().parent.parent / 'tools' / 'test-input'
+INPUT_FILES = ('hellforge-mod.json', 'harness_input.dll')
 LOADER_MANIFEST = 'BingusSharedLoader-manifest.json'
 MODS_SETTINGS = 'hellforge-mods.json'
 # Bingus Shared Loader v20 supports build 25480438, the build HellForge copies run. HD2H_LOADER_ZIP names its manager
@@ -246,12 +250,29 @@ def loader_pack(zip_path):
     return files
 
 
-def pack_files(paths, source, loader_zip=None):
-    """{folder: {relative path: bytes}} the harness adds to <root>/mods: the agent, and the loader unless the
-    installation has its own."""
+def folder_pack(folder):
+    """{relative path: bytes}: every file in a mod folder (a code mod's hellforge-mod.json and DLL, say)."""
+    folder = Path(folder)
+    if not (folder / 'hellforge-mod.json').is_file():
+        raise HellForgeError('%s is not a mod folder (no hellforge-mod.json)' % folder)
+    return {path.relative_to(folder).as_posix(): path.read_bytes()
+            for path in sorted(folder.rglob('*')) if path.is_file()}
+
+
+def pack_files(paths, source, loader_zip=None, mods=()):
+    """{folder: {relative path: bytes}} the harness adds to <root>/mods: the agent, the loader unless the
+    installation has its own, the test input mod once it is built, and the mod folders given (start --mod), each
+    under zz-test-<its folder name>."""
     packs = {AGENT_FOLDER: agent_pack(source)}
     if installed_loader(paths) is None:
         packs[LOADER_FOLDER] = loader_pack(loader_zip or LOADER_ZIP)
+    if all((INPUT_SOURCE / name).is_file() for name in INPUT_FILES):
+        packs[INPUT_FOLDER] = {name: (INPUT_SOURCE / name).read_bytes() for name in INPUT_FILES}
+    for folder in mods:
+        name = 'zz-test-' + Path(folder).resolve().name
+        if name in packs:
+            raise HellForgeError('two --mod folders are named %s' % Path(folder).name)
+        packs[name] = folder_pack(folder)
     return packs
 
 
