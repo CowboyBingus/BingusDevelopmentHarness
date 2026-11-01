@@ -2,11 +2,13 @@
 
 Every session forces Invite Only lobby privacy (privacy_mode = 2 in the profile file), unless a HellForge session
 opts in to Public (session.start checks when that is allowed).
-The `light` preset also caps the frame rate at 30, mutes audio and runs windowed at
+The `light` preset also caps the frame rate at 30 (HD2H_FRAMERATE overrides the cap, for runs judged by motion: a
+first-person view looks janky at 30), mutes audio and runs windowed at
 1280x720, so a background session costs less and covers less of the screen. It scales the
 upscaler's stored input size to the window as well (see scale_render_resolution).
 """
 import hashlib
+import os
 from pathlib import Path
 import re
 import shutil
@@ -129,7 +131,10 @@ def apply(paths, preset, backup_dir, record, privacy='invite'):
     backup_dir.mkdir(parents=True, exist_ok=True)
     profiles = profile_files(paths)
     profile_values = dict(plan['profile'], privacy_mode=PRIVACY[privacy])
-    targets = {'main': (Path(paths.settings_file), plan['main'], plan['resolution'])}
+    main = dict(plan['main'])
+    if 'framerate_limit' in main and os.environ.get('HD2H_FRAMERATE', '').isdigit():
+        main['framerate_limit'] = os.environ['HD2H_FRAMERATE']
+    targets = {'main': (Path(paths.settings_file), main, plan['resolution'])}
     for index, profile in enumerate(profiles):
         targets['profile' if index == 0 else 'profile:' + profile.name] = (profile, profile_values, None)
     for extra in sorted(Path(paths.saves).iterdir()):

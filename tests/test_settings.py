@@ -1,7 +1,9 @@
 """Settings presets: changed for a session, restored byte-for-byte."""
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import support  # noqa: F401
 from hd2h import settings
@@ -34,6 +36,17 @@ class Presets(unittest.TestCase):
             self.assertEqual(settings.privacy(paths), '1')
             with self.assertRaises(settings.SettingsError):
                 settings.apply(paths, 'private', Path(tmp) / 'backup', lambda entry: None, privacy='friends')
+
+    def test_framerate_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_paths(tmp)
+            with mock.patch.dict(os.environ, {'HD2H_FRAMERATE': '60'}):
+                entry = settings.apply(paths, 'light', Path(tmp, 'backup'), lambda entry: None)
+            main = paths.settings_file.read_text()
+            self.assertIn('\nframerate_limit = 60\n', main)
+            self.assertIn('\tframerate_limit = 99\n', main, 'indented keys inside blocks stay')
+            self.assertEqual(settings.restore(entry), [])
+            self.assertIn('\nframerate_limit = 30\n', paths.settings_file.read_text())
 
     def check_round_trip(self, newline):
         with tempfile.TemporaryDirectory() as tmp:
