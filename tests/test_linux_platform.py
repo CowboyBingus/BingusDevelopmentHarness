@@ -161,6 +161,7 @@ class SpawnLinux(unittest.TestCase):
             self.assertEqual(runner, 4242)
             self.assertEqual(call.arguments[:4], ['bash', str(wrapper), str(paths.session_runner), 'play'])
             self.assertEqual(call.arguments[5], hellforge.to_wine_path(paths.hellforge))
+            self.assertIn('--sandbox', call.arguments, 'the launcher default is on, on Linux too')
             self.assertEqual(call.kwargs['cwd'], str(paths.hellforge))
             self.assertTrue(call.kwargs['start_new_session'])
             self.assertIs(call.kwargs['stdin'], subprocess.DEVNULL)

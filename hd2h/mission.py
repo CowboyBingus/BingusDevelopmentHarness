@@ -19,7 +19,6 @@ import struct
 import time
 
 from . import builds, winapi
-from .mailbox import Mailbox
 from .state import State
 
 SHIP, MISSION, PREPARE_SHIP, PREPARE_MISSION = 3, 4, 5, 6
@@ -713,7 +712,8 @@ def _context(paths, manifest, note, shoot=None):
         raise MissionError('game.dll is not mapped yet')
     reader = winapi.Reader(pid)
     state_of = lambda: session.live_reads(pid, build).get('state')
-    deployer = Deployer(Probe(reader, base, build.mission), Natives(Mailbox(paths.mailbox), base, build.mission),
+    deployer = Deployer(Probe(reader, base, build.mission),
+                        Natives(session.mailbox_for(paths, manifest), base, build.mission),
                         state_of, note=note, shoot=shoot)
     return session, build, reader, deployer
 
