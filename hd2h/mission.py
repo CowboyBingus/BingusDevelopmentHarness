@@ -15,6 +15,7 @@ Account/ReportPosition when the ship travels, Operation/Mission/Start at launch,
 report on leaving. Solo sessions only; the lobby must be Invite Only.
 """
 import datetime
+import os
 import struct
 import time
 
@@ -283,10 +284,20 @@ class Probe:
         index = self._hashed(entities + 0xF22EC8, ref)
         if index is None or index >= 262144:
             return None
-        avatar = self.read(entities + 0xF32F18 + 24 * index, 24)
+        avatar = self.read(entities + self._records() + 24 * index, 24)
         if avatar[:8] != bytes.fromhex('97fa4d294d331c4d') or not avatar[20] & 1:
             return None
         return _u32(avatar, 8) or None
+
+    def _records(self):
+        """The entity records' offset from the entity manager: +0xF32F18, unless a mod moved them (HellForge's extra
+        large maps do, to hold more than 2048). The game's own code says where: game 0xFDCEE8 is `mov eax, [rbp+disp32]`
+        reading a record's +8, so the records are at that displacement - 8."""
+        try:
+            code = self.read(self.base + 0xFDCEE8, 6)
+        except MissionError:
+            return 0xF32F18
+        return _i32(code, 2) - 8 if code[:2] == b'\x8b\x85' else 0xF32F18
 
     def seater(self, avatar_id):
         """The avatar's seater entity pointer and whether it is free to enter a seat."""
@@ -521,6 +532,7 @@ class Deployer:
     """The steps, on a Probe-like reader and a Natives-like caller (tests pass fakes)."""
 
     def __init__(self, probe, natives, game_state, note=print, shoot=None):
+        self.created = time.time()  # a drop file older than this belongs to an earlier session
         self.probe, self.natives, self.game_state, self.note = probe, natives, game_state, note
         self.shoot = shoot or (lambda name: None)
 
@@ -644,6 +656,32 @@ class Deployer:
         return {'intro_skipped': skipped}
 
     def drop(self):
+        forced = os.environ.get('HD2H_DROP')  # "x,y": the drop zone set directly (research runs)
+        if forced and forced.startswith('file:'):
+            # "file:<glob>": the newest matching file written since this mission command began holds "x,y" (a mod's suggestion,
+            # written while the level generates during the briefing; waited for up to 10 minutes); without one the drop
+            # falls back to the map centre.
+            import glob
+            pattern = forced[5:]
+            started = time.time()
+            fresh = []
+            while not fresh and time.time() - started < 600:  # the level may still be generating (a 16 km map takes over 4 minutes)
+                fresh = [p for p in glob.glob(pattern) if os.path.getmtime(p) >= self.created - 5]
+                if not fresh:
+                    time.sleep(2)
+            forced = None
+            if fresh:
+                path = max(fresh, key=os.path.getmtime)
+                with open(path) as f:  # one line per generated level: the last is this mission's
+                    lines = [line.strip() for line in f if line.strip()]
+                forced = lines[-1] if lines else None
+                self.note('drop from %s: %s' % (path, forced))
+            else:
+                self.note('no fresh drop file for %s' % pattern)
+        if forced:
+            x, y = (float(v) for v in forced.split(','))
+            self.note('dropping at %g, %g (HD2H_DROP)' % (x, y))
+            return {'drop': self.require(self.natives.drop_at(x, y), 'the drop zone')}
         values = self.natives.drop_confirm()
         if not values or values[0] is not True:
             self.note('drop confirm gave %s; dropping at the map centre' % (values,))
@@ -711,7 +749,13 @@ def _context(paths, manifest, note, shoot=None):
     if not base:
         raise MissionError('game.dll is not mapped yet')
     reader = winapi.Reader(pid)
-    state_of = lambda: session.live_reads(pid, build).get('state')
+
+    def state_of():
+        # A game that crashed reads as no state: every wait ends at once instead of running out its timeout.
+        state = session.live_reads(pid, build).get('state')
+        if state is None and pid not in session.running():
+            raise MissionError('the game exited (pid %s)' % pid)
+        return state
     deployer = Deployer(Probe(reader, base, build.mission),
                         Natives(session.mailbox_for(paths, manifest), base, build.mission),
                         state_of, note=note, shoot=shoot)

@@ -8,6 +8,10 @@
                                                HellForge target: press keys and mouse buttons and move the
                                                mouse inside the engine (tools/test-input, deployed once built)
   python harness.py state                      agent state plus live game state, mission and privacy
+  python harness.py playable                   in a mission and in control? (exit 3 and the reason when not)
+  python harness.py guard [--grace 45] [--stop]
+                                               block while the mission stays playable; return (exit 3) once it
+                                               was unplayable for --grace s (dead, menu, mission over) or exited
   python harness.py ship                       press continue on the title screen, wait for the ship
   python harness.py mission [--difficulty N] [--planet ID | --faction F [--pick N]] [--shots]
                                                ship -> a solo mission until the player has control
@@ -44,7 +48,7 @@ import json
 from pathlib import Path
 import sys
 
-from hd2h import archive, capture, deploy, dumps, galaxy, hellforge, mission, navigate, scenarios, session, settings, winapi
+from hd2h import archive, capture, deploy, dumps, galaxy, guard, hellforge, mission, navigate, scenarios, session, settings, winapi
 from hd2h.mailbox import MailboxError
 from hd2h.paths import TARGETS, Paths
 from hd2h.state import State
@@ -60,11 +64,23 @@ def emit(value):
     print(json.dumps(value, indent=2, default=str))
 
 
+class Stalled(Exception):
+    """The watchdog marked this session stalled: a step against it would act on a dead mission."""
+
+
+def not_stalled(paths):
+    manifest = launched(paths)
+    record = guard.stall_mark(paths, manifest)
+    if record:
+        raise Stalled('the session stalled at %s (%s: %s); start a new one' % (record.get('at'), record.get('verdict'), record.get('reason')))
+    return manifest
+
+
 def command_lua(paths, args):
     source = Path(args.file).read_text(encoding='utf-8') if args.file else args.code
     if not source:
         raise SystemExit('give Lua code or --file')
-    return session.mailbox_for(paths, launched(paths)).send(source, timeout=args.timeout)
+    return session.mailbox_for(paths, not_stalled(paths)).send(source, timeout=args.timeout)
 
 
 # The input command's Lua: names to button indices, then the test input mod's export (tools/test-input).
@@ -91,7 +107,7 @@ return call(table.concat(parts, ';'))
 
 def command_input(paths, args):
     code = INPUT_LUA % json.dumps(args.commands)
-    return session.mailbox_for(paths, launched(paths)).send(code, timeout=args.timeout)
+    return session.mailbox_for(paths, not_stalled(paths)).send(code, timeout=args.timeout)
 
 
 def command_state(paths, args):
@@ -142,14 +158,16 @@ def command_mission(paths, args, note):
                 return None
     if args.pick is not None and not args.faction:
         raise mission.MissionError('--pick needs --faction')
-    return mission.deploy(paths, launched(paths), difficulty=args.difficulty, planet=args.planet,
-                          faction=args.faction, note=note, shoot=shoot, pick=args.pick, mission_pick=args.mission_pick,
-                          region_tag=args.region_tag)
+    result = mission.deploy(paths, launched(paths), difficulty=args.difficulty, planet=args.planet,
+                            faction=args.faction, note=note, shoot=shoot, pick=args.pick, mission_pick=args.mission_pick,
+                            region_tag=args.region_tag)
+    guard.start_watchdog(paths, note=note)  # every deployed mission is watched (user 2026-11-07)
+    return result
 
 
 def add_mission_arguments(parser):
-    parser.add_argument('--difficulty', type=int, choices=range(1, 11), default=1, metavar='1-10',
-                        help='difficulty of a new operation (an active operation is continued as it is)')
+    parser.add_argument('--difficulty', type=int, choices=range(1, 12), default=1, metavar='1-11',
+                        help='difficulty of a new operation, 11 with a HellForge level-11 mod (an active operation is continued as it is)')
     where = parser.add_mutually_exclusive_group()
     where.add_argument('--planet', type=int, help='planet index (must have a campaign)')
     where.add_argument('--faction', choices=sorted(mission.FACTIONS), help='first campaign planet of this faction')
@@ -235,6 +253,15 @@ def main(argv=None):
     input_parser.add_argument('--timeout', type=float, default=15)
     state = sub.add_parser('state')
     state.add_argument('--timeout', type=float, default=15)
+    sub.add_parser('playable', help='is the player in a mission and in control? (exit code 3 when not, with why)')
+    guard_parser = sub.add_parser('guard', help='watch a mission session; return (exit code 3) once it has been '
+                                                'unplayable for --grace seconds (dead, menu, mission over) or exited')
+    guard_parser.add_argument('--grace', type=float, default=45, help='seconds unplayable in a row (default 45)')
+    guard_parser.add_argument('--interval', type=float, default=5)
+    guard_parser.add_argument('--arm-timeout', type=float, default=900,
+                              help='give up when it never became playable within this many seconds')
+    guard_parser.add_argument('--stop', action='store_true', help='then stop the session (killing the game)')
+    guard_parser.add_argument('--mark', action='store_true', help='write the stall mark, so later lua / input steps refuse')
     stop = sub.add_parser('stop')
     stop.add_argument('--kill', action='store_true', help='skip the graceful quit')
     sub.add_parser('watch')
@@ -292,6 +319,7 @@ def main(argv=None):
         elif args.command == 'close':
             emit(session.close_running(note))
         elif args.command == 'start':
+            guard.end_watchdog(paths); guard.clear(paths)  # a new session: no old watchdog or stall mark
             manifest = session.start(paths, preset=args.preset, condition=args.condition,
                                      agent=args.condition != 'vanilla', note=note, take_over=not args.keep_running,
                                      packages=tuple(args.package), multiplayer=MULTIPLAYER[args.multiplayer],
@@ -320,7 +348,23 @@ def main(argv=None):
             emit(capture.run_shot(paths, args.name))
         elif args.command == 'state':
             emit(command_state(paths, args))
+        elif args.command == 'playable':
+            verdict = guard.playable(paths, launched(paths), note=note)
+            emit(verdict)
+            return 0 if verdict['playable'] else 3
+        elif args.command == 'guard':
+            manifest = launched(paths)
+            verdict = guard.guard(paths, manifest, grace=args.grace, interval=args.interval,
+                                  arm_timeout=args.arm_timeout, note=note)
+            emit(verdict)
+            if args.mark:
+                guard.mark(paths, manifest, verdict)
+            guard.forget_pid(paths)
+            if args.stop and verdict.get('verdict') != 'exited':
+                report_session(session.stop(paths, kill=True, note=note), note)
+            return 3
         elif args.command == 'stop':
+            guard.end_watchdog(paths)
             return report_session(session.stop(paths, kill=args.kill, note=note), note)
         elif args.command == 'watch':
             return report_session(session.watch(paths, note=note), note)
@@ -347,6 +391,9 @@ def main(argv=None):
             emit([dumps.describe(path) for path in args.files])
         elif args.command == 'build-agent':
             emit(command_build_agent(paths, args))
+    except Stalled as error:
+        note('error: %s' % error)
+        return 3
     except (session.HarnessError, MailboxError, deploy.DeployError, settings.SettingsError,
             winapi.WinError, navigate.NavigationError, mission.MissionError, capture.CaptureError,
             hellforge.HellForgeError) as error:

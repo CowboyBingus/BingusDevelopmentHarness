@@ -48,6 +48,17 @@ class Presets(unittest.TestCase):
             self.assertEqual(settings.restore(entry), [])
             self.assertIn('\nframerate_limit = 30\n', paths.settings_file.read_text())
 
+    def test_resolution_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = fake_paths(tmp)
+            with mock.patch.dict(os.environ, {'HD2H_RESOLUTION': '3440x1440'}):
+                entry = settings.apply(paths, 'light', Path(tmp, 'backup'), lambda entry: None)
+            self.assertEqual(settings.read_resolution(paths.settings_file.read_text()), (3440, 1440))
+            self.assertEqual(settings.restore(entry), [])
+            with mock.patch.dict(os.environ, {'HD2H_RESOLUTION': 'native'}):
+                settings.apply(paths, 'light', Path(tmp, 'backup2'), lambda entry: None)
+            self.assertEqual(settings.read_resolution(paths.settings_file.read_text()), (1280, 720), 'a bad value keeps the preset')
+
     def check_round_trip(self, newline):
         with tempfile.TemporaryDirectory() as tmp:
             paths = fake_paths(tmp, newline)

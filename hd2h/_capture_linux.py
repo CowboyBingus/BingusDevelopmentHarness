@@ -49,7 +49,8 @@ def grab(pid):
     if width <= 0 or height <= 0:
         raise CaptureError('the game window has no client area')
     try:
-        result = subprocess.run(tool + ['-window', str(window), '-depth', '8', 'bgra:-'],
+        # -silent: import rings the X bell after every capture otherwise
+        result = subprocess.run(tool + ['-silent', '-window', str(window), '-depth', '8', 'bgra:-'],
                                 capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise CaptureError('the window capture failed: %s' % error) from error
